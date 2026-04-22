@@ -2,10 +2,16 @@
 Correlated Monte Carlo Simulation Engine
 Simulates 10,000 correlated price paths over 60 days
 
-CONFIDENCE FIX (Apr 2026):
-  Old: confidence = fraction of paths hitting median low (always ~50% by definition)
-  New: confidence = fraction of paths where price dips below current price at any point
-  This answers the actual question: "If I wait, is a better price coming?"
+CONVICTION MODEL (locked in Apr 2026):
+  - Dip target = 60th percentile of path minimums
+    = "the dip level that 60% of simulated futures reach"
+  - Confidence = actual fraction of paths hitting that target (~60%)
+    = informational, not used for signal decision
+  - Signal decision is made by execution_logic based on DIP DEPTH
+    vs 3% materiality threshold, NOT on confidence
+
+  Volatile stocks (NVDA beta 2.3) → deep dip target → WAIT
+  Stable stocks (WM beta 0.65) → shallow dip target → BUY (immaterial)
 """
 
 import numpy as np
@@ -24,7 +30,7 @@ def run_monte_carlo_stock(
     correlated_randoms=None
 ):
     """
-    Run Monte Carlo simulation for one stock
+    Run Monte Carlo simulation for one stock.
 
     Args:
         current_price: current stock price
@@ -74,34 +80,26 @@ def extract_statistics(paths, current_price):
     """
     Extract key statistics from simulated paths.
 
-    Returns: dict with percentile_low, confidence, median_date
+    PERCENTILE_TARGET = 60 means:
+      "Find the price level that 60% of paths dip to or below."
+      Volatile stocks produce deep dip levels. Stable stocks produce shallow ones.
 
-    CONFIDENCE DEFINITION:
-      Fraction of 10,000 paths where the stock goes BELOW current price
-      at any point in 60 days. This answers: "If I wait, is a lower price coming?"
-
-    PERCENTILE_LOW DEFINITION:
-      50th percentile (median) of the minimum price across all paths.
-      This answers: "If a dip happens, how deep is the most likely low?"
+    Confidence is informational (~60% by construction). The actual
+    signal decision is made by execution_logic based on dip DEPTH.
     """
 
-    # Find minimum in each path
+    # Find minimum price in each path
     minimums = paths.min(axis=1)
 
-    # Target: median of the minimums = "most likely low"
+    # Dip target: the price that PERCENTILE_TARGET% of paths reach
     percentile_low = np.percentile(minimums, PERCENTILE_TARGET)
 
-    # Confidence: what fraction of paths dip below current price?
-    # THIS is the question Jesse cares about — not the tautological median check
-    confidence = float(np.mean(minimums < current_price))
+    # Confidence: actual fraction of paths hitting this level (informational)
+    confidence = float(np.mean(minimums <= percentile_low))
 
-    # Find median date when minimum occurs (among paths that do dip)
-    dipping_paths = paths[minimums < current_price]
-    if len(dipping_paths) > 0:
-        min_dates = np.argmin(dipping_paths, axis=1)
-        median_date_index = int(np.median(min_dates))
-    else:
-        median_date_index = SIMULATION_DAYS // 2  # Default to mid-window
+    # Median date: when do paths typically hit their minimum?
+    min_dates = np.argmin(paths, axis=1)
+    median_date_index = int(np.median(min_dates))
 
     return {
         'percentile_low': percentile_low,
@@ -143,7 +141,6 @@ def simulate_portfolio(portfolio_data, corr_matrix, ticker_order, regime_info):
         if price_targets.get('targetMean'):
             anchor = price_targets['targetMean']
         else:
-            # Calculate 50-day MA from historical
             anchor = data['historical']['Close'].tail(50).mean()
 
         # Extract correlated randoms for this stock
@@ -162,7 +159,6 @@ def simulate_portfolio(portfolio_data, corr_matrix, ticker_order, regime_info):
             correlated_randoms=stock_randoms
         )
 
-        # Extract statistics — pass current_price for correct confidence calc
         stats = extract_statistics(paths, data['current_price'])
 
         results[ticker] = {
