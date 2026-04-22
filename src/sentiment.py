@@ -4,10 +4,23 @@ Per-stock narrative scoring with analyst grade cross-validation
 """
 
 import os
-from anthropic import Anthropic
 
-ANTHROPIC_API_KEY = os.getenv('ANTHROPIC_API_KEY')
-client = Anthropic(api_key=ANTHROPIC_API_KEY) if ANTHROPIC_API_KEY else None
+def get_client():
+    """
+    Initialize Anthropic client only when needed
+    Returns: Anthropic client or None
+    """
+    try:
+        from anthropic import Anthropic
+        api_key = os.getenv('ANTHROPIC_API_KEY')
+        if api_key:
+            return Anthropic(api_key=api_key)
+        else:
+            print("⚠️  ANTHROPIC_API_KEY not set")
+            return None
+    except Exception as e:
+        print(f"⚠️  Failed to initialize Anthropic client: {e}")
+        return None
 
 def analyze_stock_sentiment(ticker, current_price, earnings_date, analyst_grade):
     """
@@ -17,8 +30,9 @@ def analyze_stock_sentiment(ticker, current_price, earnings_date, analyst_grade)
     Returns: dict with sentiment_score (-5 to +5), narrative (brief explanation)
     """
     
+    client = get_client()
+    
     if not client:
-        print(f"⚠️  Anthropic API key not set, skipping sentiment for {ticker}")
         return {
             'sentiment_score': 0.0,
             'narrative': "Sentiment unavailable (no API key)"
