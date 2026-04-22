@@ -1,33 +1,21 @@
 """
 HTML Dashboard Generator
 Creates the daily decision table with guardrail warning banner.
-Sort order: BUY signals first (highest conviction first), then WAIT signals.
-Ref: rationale.md §1.3 Permutation A format
+Sort: BUY first (shallowest dip = strongest buy), then WAIT (deepest dip first).
 """
 
 from datetime import datetime, timedelta
 import os
-from config import OUTPUT_DIR, OUTPUT_FILE
+from config import OUTPUT_DIR, OUTPUT_FILE, PERCENTILE_TARGET
 
 
 def generate_html(execution_data, macro_regime, vix, portfolio_data, warnings=None):
-    """
-    Generate complete HTML dashboard.
-
-    Args:
-        execution_data: dict of signals per ticker
-        macro_regime: 'risk_on', 'neutral', or 'risk_off'
-        vix: current VIX level
-        portfolio_data: dict with earnings dates and enrichment data
-        warnings: list of guardrail warning strings (optional)
-    """
     if warnings is None:
         warnings = []
 
     run_time = datetime.now().strftime("%b %d, %Y %I:%M %p BST")
     end_date = (datetime.now() + timedelta(days=60)).strftime("%b %d, %Y")
 
-    # Count BUY vs WAIT
     buy_tickers = [t for t, d in execution_data.items() if d['signal'] == 'BUY']
     wait_tickers = [t for t, d in execution_data.items() if d['signal'] == 'WAIT']
 
@@ -37,7 +25,7 @@ def generate_html(execution_data, macro_regime, vix, portfolio_data, warnings=No
         'risk_off': 'RISK-OFF'
     }
 
-    # Warning banner HTML
+    # Warning banner
     warning_html = ""
     if warnings:
         warning_items = "\n".join(f"<li>{w}</li>" for w in warnings)
@@ -48,11 +36,12 @@ def generate_html(execution_data, macro_regime, vix, portfolio_data, warnings=No
         </div>
         """
 
-    # Sort: BUY first (lowest confidence = highest conviction buy),
-    # then WAIT (lowest confidence first = weakest wait)
+    # Sort: BUY first (smallest dip = strongest buy),
+    # then WAIT (deepest dip first = most rewarding wait)
     sorted_tickers = sorted(execution_data.keys(), key=lambda t: (
         0 if execution_data[t]['signal'] == 'BUY' else 1,
-        execution_data[t]['confidence'],
+        execution_data[t].get('dip_pct', 0) if execution_data[t]['signal'] == 'BUY'
+            else -execution_data[t].get('dip_pct', 0),
     ))
 
     # Build table rows
@@ -70,16 +59,19 @@ def generate_html(execution_data, macro_regime, vix, portfolio_data, warnings=No
         if data.get('_extreme_dip'):
             stock_warn = '<span class="stock-warn" title="Extreme dip predicted">⚠️</span>'
 
-        # Target display: handle "no dip expected" case
+        # Dip percentage
+        dip_pct = data.get('dip_pct', 0)
+        dip_display = f"{dip_pct*100:.1f}%"
+
+        # Target display
         if data.get('_no_dip') or data.get('reason_code') == 'no_dip':
             target_display = "No dip expected in window"
         elif data.get('reason_code') == 'immaterial':
-            dip_pct = (data['current_price'] - data['target_price']) / data['current_price'] * 100
-            target_display = f"⬇️ ${data['target_price']:.2f} · {data['date_range']} ({dip_pct:.1f}% — immaterial)"
+            target_display = f"⬇️ ${data['target_price']:.2f} · {data['date_range']} ({dip_display} — immaterial)"
         else:
-            target_display = f"⬇️ ${data['target_price']:.2f} · {data['date_range']}"
+            target_display = f"⬇️ ${data['target_price']:.2f} · {data['date_range']} ({dip_display})"
 
-        # RSI display if available
+        # RSI badge
         rsi_val = p_data.get('rsi')
         rsi_display = ""
         if rsi_val is not None:
@@ -89,6 +81,9 @@ def generate_html(execution_data, macro_regime, vix, portfolio_data, warnings=No
             elif rsi_val < 30:
                 rsi_class = "rsi-low"
             rsi_display = f'<span class="rsi {rsi_class}">RSI {rsi_val:.0f}</span>'
+
+        # Conviction display (fixed at PERCENTILE_TARGET%)
+        conviction_display = f"Conviction: {PERCENTILE_TARGET}%"
 
         table_rows += f"""
         <tr>
@@ -101,7 +96,7 @@ def generate_html(execution_data, macro_regime, vix, portfolio_data, warnings=No
                 </div>
                 <div class="price-row">${data['current_price']:.2f} (today)</div>
                 <div class="target-row">{target_display}</div>
-                <div class="confidence-row">Confidence: {int(data['confidence']*100)}%</div>
+                <div class="confidence-row">{conviction_display}</div>
                 <div class="oneliner">{data['one_liner']}</div>
             </td>
             <td class="earnings">{earnings_display}</td>
