@@ -2,11 +2,9 @@ name: SGC Dip Engine - Daily Run
 
 on:
   schedule:
-    # Run at 21:30 UTC (9:30 PM BST in summer, 9:30 PM GMT in winter)
-    # Adjust to 20:30 UTC during winter months
-    - cron: '30 21 * * 1-5'  # Mon-Fri only
+    - cron: '30 21 * * 1-5'
   
-  workflow_dispatch:  # Allow manual trigger
+  workflow_dispatch:
 
 jobs:
   run-engine:
@@ -14,10 +12,10 @@ jobs:
     
     steps:
       - name: Checkout repository
-        uses: actions/checkout@v3
+        uses: actions/checkout@v4
       
       - name: Set up Python 3.10
-        uses: actions/setup-python@v4
+        uses: actions/setup-python@v5
         with:
           python-version: '3.10'
       
@@ -28,7 +26,6 @@ jobs:
       
       - name: Run SGC Dip Engine
         env:
-          FMP_API_KEY: ${{ secrets.FMP_API_KEY }}
           ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
         run: |
           cd src
@@ -38,6 +35,6 @@ jobs:
         run: |
           git config --global user.name 'SGC Dip Engine Bot'
           git config --global user.email 'bot@sgc-dip-engine.local'
-          git add docs/index.html
-          git commit -m "Daily update: $(date +'%Y-%m-%d %H:%M UTC')" || echo "No changes to commit"
+          git add -A
+          git diff --cached --quiet || git commit -m "Daily update: $(date +'%Y-%m-%d %H:%M UTC')"
           git push
