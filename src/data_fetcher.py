@@ -330,12 +330,18 @@ def fetch_stock_data_yfinance(ticker):
         print(f"   ✅ {ticker}: {len(hist)} days (yfinance)")
 
     # Call 2: Info (current price, targets)
-    info = stock.info
+    # yfinance gets 429 on GitHub Actions shared IPs — must not crash pipeline
+    info = {}
+    try:
+        info = stock.info
+    except Exception as e:
+        print(f"   ⚠️  {ticker} yfinance info failed: {e}")
+
     current_price = info.get('currentPrice', info.get('regularMarketPrice'))
     if current_price is None and hist is not None and not hist.empty:
         current_price = float(hist['Close'].iloc[-1])
 
-    # Earnings dates
+    # Earnings dates (separate call, also may 429)
     earnings_date = None
     try:
         earnings = stock.get_earnings_dates(limit=5)
