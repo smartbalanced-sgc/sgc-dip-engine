@@ -48,18 +48,23 @@ YFINANCE_TICKERS = {'LDO.MI'}
 # =============================================================
 SIMULATION_DAYS = 60
 NUM_PATHS = 10000
-PERCENTILE_TARGET = 50   # 50th percentile = median of minimums
+
+# CONVICTION DIAL — 60th percentile of path minimums.
+# "Show me the dip level that 60% of simulated futures reach."
+# Higher = shallower dips, more certainty they happen.
+# Lower = deeper dips, less certainty.
+# 60 = balanced: dips are likely enough to wait for, deep enough to matter.
+PERCENTILE_TARGET = 60
 
 # =============================================================
 # SIGNAL THRESHOLDS
-# Ref: rationale.md §1.4, §1.5
 # =============================================================
-BUY_THRESHOLD = 0.50   # P(dip) < 50% → BUY
 
-# Materiality: if expected dip < this %, signal BUY regardless.
-# Rationale: telling Jesse to wait for a 1.5% dip on WM is noise.
-# A 3% threshold means: only signal WAIT if the expected dip
-# saves meaningful money on the DCA contribution.
+# Materiality: if the 60%-conviction dip is smaller than this,
+# the dip isn't worth waiting for. Signal BUY regardless.
+# Rationale: on £500/mo across 14 stocks, a 2% dip on WM (£10
+# position) saves 20p. Not worth the risk of missing a run-up.
+# 3% is where savings start to matter on DCA position sizes.
 MIN_ACTIONABLE_DIP_PCT = 0.03
 
 # =============================================================
@@ -91,7 +96,6 @@ VOLUME_MIN_DAILY = 100000
 # =============================================================
 
 # GARCH annualized vol cap: above this, stock is "unmodelable"
-# No mega-cap sustains >150% annualized vol in normal markets
 VOL_UNMODELABLE_PCT = 1.50   # 150%
 
 # GARCH stationarity warning: alpha + beta near 1.0
