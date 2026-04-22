@@ -1,7 +1,7 @@
 numpy==1.24.3
 pandas==2.0.3
 yfinance==0.2.50
+requests==2.31.0
 scipy==1.11.2
-statsmodels==0.14.0
 anthropic
 lxml==5.1.0
