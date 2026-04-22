@@ -266,7 +266,6 @@ def fetch_economic_calendar():
         resp = requests.get(url, params=params, timeout=API_TIMEOUT)
         if resp.status_code == 200:
             events = resp.json()
-            # Filter for high-impact events
             keywords = ['interest rate', 'fomc', 'fed', 'cpi', 'nonfarm',
                         'unemployment', 'gdp', 'pce']
             macro_events = []
