@@ -286,7 +286,7 @@ def generate_html(execution_data, macro_regime, vix, portfolio_data):
     
     return html
 
-def save_html(html_content, output_dir="docs", filename="index.html"):
+def save_html(html_content, output_dir="../docs", filename="index.html"):
     """
     Save HTML to file
     """
