@@ -1,6 +1,7 @@
 """
 HTML Dashboard Generator
 Creates the daily decision table with guardrail warning banner.
+Sort order: BUY signals first (highest conviction first), then WAIT signals.
 Ref: rationale.md §1.3 Permutation A format
 """
 
@@ -47,9 +48,16 @@ def generate_html(execution_data, macro_regime, vix, portfolio_data, warnings=No
         </div>
         """
 
+    # Sort: BUY first (lowest confidence = highest conviction buy),
+    # then WAIT (lowest confidence first = weakest wait)
+    sorted_tickers = sorted(execution_data.keys(), key=lambda t: (
+        0 if execution_data[t]['signal'] == 'BUY' else 1,
+        execution_data[t]['confidence'],
+    ))
+
     # Build table rows
     table_rows = ""
-    for ticker in execution_data.keys():
+    for ticker in sorted_tickers:
         data = execution_data[ticker]
         p_data = portfolio_data.get(ticker, {})
         earnings = p_data.get('earnings_date', '')
