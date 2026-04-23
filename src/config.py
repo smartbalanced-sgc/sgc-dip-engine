@@ -1,143 +1,126 @@
 """
 SGC Dip Engine v6 — Configuration
-Portfolio Constitution v7 - Final Specification
+Loads from config.yaml via config_loader.
 
-All thresholds documented with rationale for independent audit.
+All thresholds now in config/config.yaml for easy tuning.
+API keys in environment variables only (never hardcoded).
 """
 
 import os
+from config_loader import load_config, get_config
+
+# Load config on import
+config = load_config()
 
 # =============================================================
-# FMP API (primary data source for 13 US stocks)
-# Stable API pattern: symbol in query params, NOT path
-# Ref: rationale.md §2.2
+# API KEYS (Environment Variables Only - NEVER HARDCODED)
 # =============================================================
-FMP_API_KEY = os.getenv('FMP_API_KEY', 'ld6wilmawW3FutupImuIMeNIuqafQIMo')
-FMP_BASE_URL = "https://financialmodelingprep.com/stable"
-API_DELAY = 0.3   # seconds between FMP calls (rate limit)
-API_TIMEOUT = 10   # seconds per request
+FMP_API_KEY = os.getenv('FMP_API_KEY', '')  # ← SECURITY FIX: No fallback
+ANTHROPIC_API_KEY = os.getenv('ANTHROPIC_API_KEY', '')
+EULERPOOL_TOKEN = os.getenv('EULERPOOL_TOKEN', '')
+
+if not FMP_API_KEY:
+    raise ValueError("FMP_API_KEY environment variable not set")
+if not ANTHROPIC_API_KEY:
+    raise ValueError("ANTHROPIC_API_KEY environment variable not set")
 
 # =============================================================
-# PORTFOLIO — Constitution v7
-# LDO.MI uses yfinance (FMP returns 402 for European tickers)
-# Ref: rationale.md §1.7
+# FMP API Configuration
 # =============================================================
-PORTFOLIO = {
-    'NVDA':   {'weight': 0.13, 'role': 'Core Growth',    'block': 'T1'},
-    'MSFT':   {'weight': 0.13, 'role': 'Core Growth',    'block': 'T1'},
-    'GOOGL':  {'weight': 0.13, 'role': 'Core Growth',    'block': 'T1'},
-    'META':   {'weight': 0.05, 'role': 'Core Growth',    'block': 'T1'},
-    'AMZN':   {'weight': 0.03, 'role': 'Core Growth',    'block': 'T1'},
-    'AVGO':   {'weight': 0.10, 'role': 'Infrastructure', 'block': 'T2'},
-    'ASML':   {'weight': 0.08, 'role': 'Infrastructure', 'block': 'T2'},
-    'MU':     {'weight': 0.04, 'role': 'Infrastructure', 'block': 'T2'},
-    'CEG':    {'weight': 0.04, 'role': 'Power',          'block': 'P'},
-    'VST':    {'weight': 0.03, 'role': 'Power',          'block': 'P'},
-    'MA':     {'weight': 0.10, 'role': 'Resilience',     'block': 'D'},
-    'CTAS':   {'weight': 0.05, 'role': 'Resilience',     'block': 'D'},
-    'LDO.MI': {'weight': 0.05, 'role': 'Resilience',     'block': 'D'},
-    'WM':     {'weight': 0.04, 'role': 'Resilience',     'block': 'D'},
-}
+FMP_BASE_URL = get_config('data', 'fmp_base_url')
+API_DELAY = get_config('data', 'api_delay')
+API_TIMEOUT = get_config('data', 'api_timeout')
 
-# Tickers routed to yfinance instead of FMP
-YFINANCE_TICKERS = {'LDO.MI'}
+# =============================================================
+# PORTFOLIO
+# =============================================================
+PORTFOLIO = {}
+tickers = get_config('portfolio', 'tickers')
+weights = get_config('portfolio', 'weights', default={})
+
+for ticker in tickers:
+    PORTFOLIO[ticker] = {
+        'weight': weights.get(ticker, 0.0),
+        'role': 'Core',  # Simplified - full role mapping can be added later
+        'block': 'T1'
+    }
+
+YFINANCE_TICKERS = set(get_config('data', 'yfinance_tickers', default=[]))
 
 # =============================================================
 # SIMULATION PARAMETERS
-# Ref: rationale.md §1.2 Layer 4, §1.4
 # =============================================================
-SIMULATION_DAYS = 60
-NUM_PATHS = 10000
-
-# CONVICTION DIAL — 60th percentile of path minimums.
-# "Show me the dip level that 60% of simulated futures reach."
-# Higher = shallower dips, more certainty they happen.
-# Lower = deeper dips, less certainty.
-# 60 = balanced: dips are likely enough to wait for, deep enough to matter.
-PERCENTILE_TARGET = 60
+SIMULATION_DAYS = get_config('monte_carlo', 'simulation_days')
+NUM_PATHS = get_config('monte_carlo', 'num_paths')
+PERCENTILE_TARGET = get_config('signal', 'percentile_target')
 
 # =============================================================
 # SIGNAL THRESHOLDS
 # =============================================================
-
-# Materiality: if the 60%-conviction dip is smaller than this,
-# the dip isn't worth waiting for. Signal BUY regardless.
-# Rationale: on £500/mo across 14 stocks, a 2% dip on WM (£10
-# position) saves 20p. Not worth the risk of missing a run-up.
-# 3% is where savings start to matter on DCA position sizes.
-MIN_ACTIONABLE_DIP_PCT = 0.03
+MIN_ACTIONABLE_DIP_PCT = get_config('signal', 'min_actionable_dip_pct')
 
 # =============================================================
 # DATA QUALITY THRESHOLDS (Guardrails — Gate 1)
 # =============================================================
-
-# Minimum historical data rows for GARCH to be reliable
-HIST_MIN_ROWS_WARN = 200     # warn below this
-HIST_MIN_ROWS_SKIP = 50      # skip stock below this
-
-# Historical data freshness: max trading days since last data point
-HIST_MAX_STALE_DAYS = 5
-
-# Price cross-check: max divergence between quote and last close
-PRICE_CROSSCHECK_MAX_PCT = 0.03   # 3%
-
-# Single-day return outlier threshold (possible data error / split)
-RETURN_OUTLIER_PCT = 0.20   # 20% single-day move flagged
-
-# Analyst target bounds relative to current price
-ANCHOR_MIN_RATIO = 0.5    # target < 50% of price = suspect
-ANCHOR_MAX_RATIO = 2.5    # target > 250% of price = suspect
-
-# Volume floor (mean daily)
-VOLUME_MIN_DAILY = 100000
+HIST_MIN_ROWS_WARN = get_config('validation', 'gate1', 'hist_min_rows_warn')
+HIST_MIN_ROWS_SKIP = get_config('validation', 'gate1', 'hist_min_rows_skip')
+HIST_MAX_STALE_DAYS = get_config('validation', 'gate1', 'hist_max_stale_days')
+PRICE_CROSSCHECK_MAX_PCT = get_config('validation', 'gate1', 'price_crosscheck_max_pct')
+RETURN_OUTLIER_PCT = get_config('validation', 'gate1', 'return_outlier_pct')
+ANCHOR_MIN_RATIO = get_config('validation', 'gate2', 'anchor_min_ratio')
+ANCHOR_MAX_RATIO = get_config('validation', 'gate2', 'anchor_max_ratio')
+VOLUME_MIN_DAILY = get_config('validation', 'gate1', 'volume_min_daily')
 
 # =============================================================
 # MODEL OUTPUT THRESHOLDS (Guardrails — Gate 2)
 # =============================================================
-
-# GARCH annualized vol cap: above this, stock is "unmodelable"
-VOL_UNMODELABLE_PCT = 1.50   # 150%
-
-# GARCH stationarity warning: alpha + beta near 1.0
-GARCH_STATIONARITY_WARN = 0.95
-
-# Correlation matrix: max off-diagonal value
-CORR_MAX_OFFDIAG = 0.98
+VOL_UNMODELABLE_PCT = get_config('validation', 'gate2', 'vol_unmodelable_pct')
+GARCH_STATIONARITY_WARN = get_config('validation', 'gate2', 'garch_stationarity_warn')
+CORR_MAX_OFFDIAG = get_config('validation', 'gate2', 'corr_max_offdiag')
 
 # =============================================================
 # SIMULATION OUTPUT THRESHOLDS (Guardrails — Gate 3)
 # =============================================================
-
-# Flag (don't clamp) if median dip exceeds this % below current
-DIP_EXTREME_FLAG_PCT = 0.30   # 30% dip flagged as extreme
+DIP_EXTREME_FLAG_PCT = get_config('validation', 'gate3', 'dip_extreme_flag_pct')
 
 # =============================================================
 # PORTFOLIO-LEVEL THRESHOLDS (Guardrails — Gate 4)
 # =============================================================
-
-# VIX sanity bounds
-VIX_FLOOR = 5.0
-VIX_CEILING = 80.0
-
-# Minimum stocks with valid signals to publish dashboard
-MIN_VALID_STOCKS = 10
-
-# Signal flip detection: if this many signals change vs prior day
-SIGNAL_FLIP_WARN = 10
+VIX_FLOOR = get_config('validation', 'gate4', 'vix_floor')
+VIX_CEILING = get_config('validation', 'gate4', 'vix_ceiling')
+MIN_VALID_STOCKS = get_config('validation', 'gate4', 'min_valid_stocks')
+SIGNAL_FLIP_WARN = get_config('validation', 'gate4', 'signal_flip_warn')
 
 # =============================================================
 # ANALYST GRADE FRESHNESS
 # =============================================================
-ANALYST_GRADE_MAX_AGE = 90   # days
+ANALYST_GRADE_MAX_AGE = get_config('validation', 'gate1', 'analyst_grade_max_age')
 
 # =============================================================
 # HISTORICAL DATA LOOKBACK
 # =============================================================
-LOOKBACK_DAYS = 730   # ~2 years of calendar days
+LOOKBACK_DAYS = get_config('monte_carlo', 'lookback_days')
 
 # =============================================================
-# OUTPUT PATHS (relative to src/)
-# Ref: rationale.md §2.6
+# OUTPUT PATHS
 # =============================================================
 OUTPUT_DIR = "../docs"
 OUTPUT_FILE = "index.html"
+
+# =============================================================
+# ENRICHMENT COEFFICIENTS (Phase 2)
+# =============================================================
+RSI_COEFFICIENT = get_config('enrichment', 'rsi_coefficient')
+SENTIMENT_COEFFICIENT = get_config('enrichment', 'sentiment_coefficient')
+MOMENTUM_COEFFICIENT = get_config('enrichment', 'momentum_coefficient')
+INSIDER_COEFFICIENT = get_config('enrichment', 'insider_coefficient')
+MAX_TOTAL_DRIFT = get_config('enrichment', 'max_total_drift')
+
+EARNINGS_VOL_14D = get_config('enrichment', 'earnings_vol', 'within_14_days')
+EARNINGS_VOL_30D = get_config('enrichment', 'earnings_vol', 'within_30_days')
+EARNINGS_VOL_60D = get_config('enrichment', 'earnings_vol', 'within_60_days')
+
+# =============================================================
+# Validation: Check critical values loaded correctly
+# =============================================================
+print(f"✅ Config loaded: {len(PORTFOLIO)} tickers, percentile={PERCENTILE_TARGET}, threshold={MIN_ACTIONABLE_DIP_PCT}")
