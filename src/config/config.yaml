@@ -117,11 +117,11 @@ enrichment:
     within_60_days: 1.15  # Earnings 31-60 days out
 
 # ----------------------------------------------------------------------------
-# TIME-VARYING VOLATILITY (Phase 3 - Session 2)
+# TIME-VARYING VOLATILITY (Session 2)
 # ----------------------------------------------------------------------------
 volatility_schedule:
-  # Enabled flag (Phase 3 feature)
-  enabled: false
+  # Session 2: ENABLED — concentrates vol spike on catalyst days
+  enabled: true
   
   # Volatility spike on earnings day itself
   # Day of earnings announcement gets 3× base vol
@@ -137,11 +137,11 @@ volatility_schedule:
   macro_event_multiplier: 2.0
 
 # ----------------------------------------------------------------------------
-# POST-EARNINGS ANCHOR SUPPRESSION (Phase 3 - Session 2)
+# POST-EARNINGS ANCHOR SUPPRESSION (Session 2)
 # ----------------------------------------------------------------------------
 anchor_suppression:
-  # Enabled flag (Phase 3 feature)
-  enabled: false
+  # Session 2: ENABLED — prevents false signals when targets are stale
+  enabled: true
   
   # Disable mean reversion anchor after large post-earnings moves
   # Prevents false signals when analyst targets are stale
@@ -181,11 +181,11 @@ data:
   use_eulerpool_fallback: true
 
 # ----------------------------------------------------------------------------
-# BACKTEST (Phase 3 - Session 2)
+# BACKTEST (Session 2)
 # ----------------------------------------------------------------------------
 backtest:
-  # Enabled flag (Phase 3 feature)
-  enabled: false
+  # Session 2: ENABLED — compares predictions vs actuals
+  enabled: true
   
   # Minimum days of signal history before backtest runs
   # Need sufficient data to measure hit rate
