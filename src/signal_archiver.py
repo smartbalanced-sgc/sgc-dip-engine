@@ -1,5 +1,5 @@
 """
-Signal Archiver — SGC Dip Engine v6
+Signal Archiver — SGC Dip Engine v7
 Appends daily signals to CSV for backtest analysis.
 """
 
