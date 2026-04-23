@@ -1,5 +1,5 @@
 """
-SGC Dip Engine v6 — Configuration
+SGC Dip Engine v7 — Configuration
 Loads from config.yaml via config_loader.
 
 All thresholds now in config/config.yaml for easy tuning.
