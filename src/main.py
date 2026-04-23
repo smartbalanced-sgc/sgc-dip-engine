@@ -20,6 +20,7 @@ from monte_carlo import simulate_portfolio
 from sentiment import analyze_stock_sentiment
 from execution_logic import process_execution_signals
 from dashboard_generator import generate_html, save_html
+from signal_archiver import archive_signals
 from validators import (
     validate_input_data,
     validate_volatility,
@@ -187,6 +188,16 @@ def main():
         warnings=all_warnings
     )
     save_html(html)
+
+    # =========================================================
+    # STEP 8: Archive signals for backtest
+    # =========================================================
+    print("\n📝 STEP 8: Archiving signals...")
+    try:
+        archive_signals(execution_data, portfolio_data)
+    except Exception as e:
+        print(f"   ⚠️  Signal archive failed: {e}")
+        # Continue - archiving is not critical for daily operation
 
     # Summary
     print("\n" + "=" * 60)
