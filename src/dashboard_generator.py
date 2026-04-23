@@ -193,6 +193,13 @@ def generate_html(execution_data, macro_regime, vix, portfolio_data, warnings=No
         .rsi-high {{ background: #4a1a1a; color: #ff6b6b; }}
         .rsi-low {{ background: #1a3a1a; color: #66bb6a; }}
 
+        .run-btn {{
+            display: inline-block; padding: 6px 18px; background: #4a9eff;
+            color: #0a0e1a; text-decoration: none; border-radius: 6px;
+            font-weight: 700; font-size: 0.85em;
+        }}
+        .run-btn:hover {{ background: #6bb3ff; }}
+
         @media (max-width: 768px) {{
             .deployment-row {{ flex-direction: column; gap: 10px; }}
         }}
