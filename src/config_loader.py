@@ -1,5 +1,5 @@
 """
-Configuration Loader — SGC Dip Engine v6
+Configuration Loader — SGC Dip Engine v7
 Loads and validates config.yaml, provides clean interface for all modules.
 """
 
