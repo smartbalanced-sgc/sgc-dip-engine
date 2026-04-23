@@ -1,0 +1,310 @@
+# ============================================================================
+# SGC DIP ENGINE CONFIGURATION
+# ============================================================================
+# All behavioral parameters for Monte Carlo simulation, signal generation,
+# enrichment modifiers, validation thresholds, and execution schedule.
+# Modify values here instead of hardcoding in Python files.
+# ============================================================================
+
+# ----------------------------------------------------------------------------
+# PORTFOLIO
+# ----------------------------------------------------------------------------
+portfolio:
+  # Stocks to analyze (order determines dashboard display)
+  # US stocks use FMP, LDO.MI uses yfinance with Eulerpool fallback
+  tickers:
+    - NVDA
+    - MSFT
+    - GOOGL
+    - META
+    - AMZN
+    - MA
+    - WM
+    - MU
+    - ASML
+    - AVGO
+    - CTAS
+    - VST
+    - CEG
+    - LDO.MI
+  
+  # Portfolio weights (Constitution v7)
+  # Used for display and future weighted correlation
+  weights:
+    NVDA: 0.13
+    MSFT: 0.13
+    GOOGL: 0.13
+    META: 0.05
+    AMZN: 0.03
+    AVGO: 0.10
+    ASML: 0.08
+    MU: 0.04
+    CEG: 0.04
+    VST: 0.03
+    MA: 0.10
+    CTAS: 0.05
+    LDO.MI: 0.05
+    WM: 0.04
+
+# ----------------------------------------------------------------------------
+# SIGNAL LOGIC (The Two Core Parameters)
+# ----------------------------------------------------------------------------
+signal:
+  # Conviction dial: what percentile of MC paths to use for dip target
+  # 60 = show dip that 60% of paths reach
+  # Higher = shallower dips (more certain), Lower = deeper dips (less certain)
+  # Range: 50-80 recommended, 60 is balanced
+  percentile_target: 60
+  
+  # Materiality threshold: minimum dip worth waiting for
+  # If predicted dip < this %, signal BUY (not worth waiting)
+  # 0.03 = 3% threshold
+  # On £500/mo positions, 3% is where savings compound meaningfully
+  min_actionable_dip_pct: 0.03
+
+# ----------------------------------------------------------------------------
+# MONTE CARLO SIMULATION
+# ----------------------------------------------------------------------------
+monte_carlo:
+  # Number of price paths to simulate per stock
+  # Higher = more stable results but slower
+  num_paths: 10000
+  
+  # Simulation horizon (trading days)
+  # Must match DCA deployment window
+  simulation_days: 60
+  
+  # Lookback period for correlation matrix (trading days)
+  # 60 days = ~3 months of market behavior
+  correlation_lookback_days: 60
+  
+  # Historical data lookback for GARCH/HMM (calendar days)
+  # 730 = ~2 years of data for stable model fitting
+  lookback_days: 730
+
+# ----------------------------------------------------------------------------
+# ENRICHMENT MODIFIERS (Phase 2)
+# ----------------------------------------------------------------------------
+enrichment:
+  # RSI: (50 - RSI) / coefficient → drift modifier
+  # RSI 70 (overbought): -0.04 drift (pullback likely)
+  # RSI 30 (oversold): +0.04 drift (bounce likely)
+  rsi_coefficient: 500
+  
+  # Claude sentiment: score / coefficient → drift modifier
+  # Score ranges -5 to +5, produces ±0.05 max
+  sentiment_coefficient: 100
+  
+  # Momentum (contrarian): -momentum / coefficient → drift
+  # Strong rally → negative drift (pullback likely)
+  # Coefficient produces ±0.02 max from typical momentum
+  momentum_coefficient: 1000
+  
+  # Insider activity: (ratio - 0.5) / coefficient → drift, capped at ±0.03
+  # ratio > 1 = net buying, ratio < 1 = net selling
+  # 0.5 = neutral midpoint
+  insider_coefficient: 25
+  
+  # Maximum total drift from all enrichment sources combined
+  # Prevents enrichment from overwhelming base GARCH model
+  max_total_drift: 0.10
+  
+  # Earnings proximity volatility multipliers
+  # Applied uniformly in Phase 2, time-varying in Phase 3
+  earnings_vol:
+    within_14_days: 1.5   # Earnings within 14 days
+    within_30_days: 1.3   # Earnings 15-30 days out
+    within_60_days: 1.15  # Earnings 31-60 days out
+
+# ----------------------------------------------------------------------------
+# TIME-VARYING VOLATILITY (Phase 3 - Session 2)
+# ----------------------------------------------------------------------------
+volatility_schedule:
+  # Enabled flag (Phase 3 feature)
+  enabled: false
+  
+  # Volatility spike on earnings day itself
+  # Day of earnings announcement gets 3× base vol
+  earnings_day_multiplier: 3.0
+  
+  # Volatility on days before/after earnings
+  # Days ±2 around earnings get 1.5× base vol
+  earnings_pre_post_multiplier: 1.5
+  earnings_pre_post_window: 2  # ±2 days
+  
+  # Macro event volatility spikes (Fed meetings, CPI)
+  # Applied market-wide on event days
+  macro_event_multiplier: 2.0
+
+# ----------------------------------------------------------------------------
+# POST-EARNINGS ANCHOR SUPPRESSION (Phase 3 - Session 2)
+# ----------------------------------------------------------------------------
+anchor_suppression:
+  # Enabled flag (Phase 3 feature)
+  enabled: false
+  
+  # Disable mean reversion anchor after large post-earnings moves
+  # Prevents false signals when analyst targets are stale
+  
+  # How many days after earnings to check for gaps
+  lookback_days: 5
+  
+  # Single-day return threshold to trigger suppression (5% = 0.05)
+  # If stock gaps >5% within 5 days of earnings, suppress anchor
+  return_threshold: 0.05
+  
+  # Reduce anchor strength to this fraction (0.1 = 10% strength)
+  # Nearly disables mean reversion when stale
+  suppression_factor: 0.1
+
+# ----------------------------------------------------------------------------
+# DATA SOURCES
+# ----------------------------------------------------------------------------
+data:
+  # API call delay (seconds, respects FMP rate limits)
+  # 0.3s = 200 calls/min, well within 300/min Starter limit
+  api_delay: 0.3
+  
+  # API timeout per request (seconds)
+  api_timeout: 10
+  
+  # FMP base URL
+  fmp_base_url: "https://financialmodelingprep.com/stable"
+  
+  # Tickers routed to yfinance instead of FMP
+  # European stocks not available on FMP
+  yfinance_tickers:
+    - LDO.MI
+  
+  # Eulerpool fallback for LDO.MI when yfinance fails
+  # yfinance gets 429 errors on GitHub Actions shared IPs
+  use_eulerpool_fallback: true
+
+# ----------------------------------------------------------------------------
+# BACKTEST (Phase 3 - Session 2)
+# ----------------------------------------------------------------------------
+backtest:
+  # Enabled flag (Phase 3 feature)
+  enabled: false
+  
+  # Minimum days of signal history before backtest runs
+  # Need sufficient data to measure hit rate
+  min_history_days: 14
+  
+  # Target hit rate range (for calibration alerts)
+  # If hit rate outside this range, flag for tuning
+  # 55-65% matches 60th percentile target
+  target_hit_rate_min: 0.55  # 55%
+  target_hit_rate_max: 0.65  # 65%
+  
+  # Rolling window for backtest analysis (days)
+  # Use last N days of signals for hit rate calculation
+  rolling_window_days: 30
+
+# ----------------------------------------------------------------------------
+# VALIDATION THRESHOLDS
+# ----------------------------------------------------------------------------
+validation:
+  # Gate 1: Input data quality
+  gate1:
+    # Minimum historical data rows
+    hist_min_rows_warn: 200   # Warn below this
+    hist_min_rows_skip: 50    # Skip stock below this
+    
+    # Max trading days since last data point
+    hist_max_stale_days: 5
+    
+    # Price cross-check: max divergence quote vs close
+    price_crosscheck_max_pct: 0.03  # 3%
+    
+    # Single-day return outlier (possible split/error)
+    return_outlier_pct: 0.20  # 20%
+    
+    # Volume floor (mean daily)
+    volume_min_daily: 100000
+    
+    # Analyst grade max age (days)
+    analyst_grade_max_age: 90
+  
+  # Gate 2: Model output sanity
+  gate2:
+    # GARCH annualized vol cap (above = unmodelable)
+    vol_unmodelable_pct: 1.50  # 150%
+    
+    # GARCH stationarity warning (alpha + beta near 1.0)
+    garch_stationarity_warn: 0.95
+    
+    # Analyst target bounds relative to current price
+    anchor_min_ratio: 0.5   # Target < 50% of price = suspect
+    anchor_max_ratio: 2.5   # Target > 250% of price = suspect
+    
+    # Correlation matrix: max off-diagonal value
+    corr_max_offdiag: 0.98
+  
+  # Gate 3: Simulation output sanity
+  gate3:
+    # Flag if median dip exceeds this % below current
+    dip_extreme_flag_pct: 0.30  # 30% dip flagged
+  
+  # Gate 4: Portfolio-level coherence
+  gate4:
+    # VIX sanity bounds
+    vix_floor: 5.0
+    vix_ceiling: 80.0
+    
+    # Minimum stocks with valid signals to publish
+    min_valid_stocks: 10
+    
+    # Signal flip detection (vs prior day)
+    signal_flip_warn: 10
+
+# ----------------------------------------------------------------------------
+# DASHBOARD
+# ----------------------------------------------------------------------------
+dashboard:
+  # Output file path (relative to repo root)
+  output_path: "docs/index.html"
+  
+  # Page title
+  title: "SGC Dip Engine — Portfolio Intelligence Dashboard"
+  
+  # Sort order: buy_first or wait_first
+  # buy_first shows BUY signals at top, deepest WAITs at bottom
+  sort_order: "buy_first"
+  
+  # Display options
+  show_rsi_badges: true
+  show_validation_flags: true
+  show_run_now_button: true
+  
+  # Cache control (force browser refresh)
+  cache_control: "no-cache, no-store, must-revalidate"
+
+# ----------------------------------------------------------------------------
+# EXECUTION SCHEDULE
+# ----------------------------------------------------------------------------
+schedule:
+  # When to run (cron format)
+  # Default: Mon-Fri at 8:30 PM UTC (9:30 PM BST during summer)
+  # Format: "minute hour day month weekday"
+  cron: "30 20 * * 1-5"
+  
+  # Timezone for display/logging
+  timezone: "Europe/London"
+
+# ----------------------------------------------------------------------------
+# LOGGING
+# ----------------------------------------------------------------------------
+logging:
+  # Log level: DEBUG, INFO, WARNING, ERROR
+  level: "INFO"
+  
+  # Save detailed logs to file
+  save_logs: false
+  
+  # Log file path (if save_logs is true)
+  log_file_path: "data/execution.log"
+
+# ============================================================================
+# END OF CONFIGURATION
+# ============================================================================
