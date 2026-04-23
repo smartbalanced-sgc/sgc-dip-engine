@@ -209,6 +209,9 @@ def generate_html(execution_data, macro_regime, vix, portfolio_data, warnings=No
             <div class="meta" style="margin-top: 8px;">
                 Window: 60 days remaining (ends {end_date})
             </div>
+            <div style="margin-top: 12px;">
+                <a href="https://github.com/smartbalanced-sgc/sgc-dip-engine/actions" target="_blank" class="run-btn">▶ Run Now</a>
+            </div>
         </div>
 
         {warning_html}
