@@ -1,7 +1,10 @@
 """
 Main Orchestrator — SGC Dip Engine v6
-Runs the full pipeline with 4-gate validation:
-  Data → GATE 1 → Models → GATE 2 → MC → GATE 3 → Signals → GATE 4 → Dashboard
+Pipeline with Phase 2 enrichment:
+  Data → GATE 1 → Regimes → GATE 2 → Sentiment → Correlation → MC → GATE 3 → Signals → GATE 4 → Dashboard
+
+Phase 2 change: Sentiment runs BEFORE MC so Claude API scores
+feed into the simulation as drift modifiers.
 """
 
 import sys
@@ -36,7 +39,7 @@ def main():
     all_warnings = []
 
     # =========================================================
-    # STEP 1: Fetch all data
+    # STEP 1: Fetch all data (15 FMP endpoints + yfinance + macro)
     # =========================================================
     print("\n📊 STEP 1: Fetching portfolio data...")
     portfolio_data, macro_events = fetch_portfolio_data()
@@ -48,17 +51,15 @@ def main():
     for w in gate1_warnings:
         print(f"   {w}")
 
-    # Check if enough stocks survived Gate 1
     valid_stocks = {t: d for t, d in portfolio_data.items() if not d.get('_skip')}
     if len(valid_stocks) < MIN_VALID_STOCKS:
         print(f"\n❌ Only {len(valid_stocks)} valid stocks — below minimum {MIN_VALID_STOCKS}")
-        print("   Generating error dashboard...")
         html = generate_html({}, 'neutral', 0, portfolio_data, warnings=all_warnings)
         save_html(html)
         return 1
 
     # =========================================================
-    # STEP 2: Detect regimes
+    # STEP 2: Detect regimes (macro + per-stock)
     # =========================================================
     print("\n🔍 STEP 2: Detecting regimes...")
 
@@ -93,7 +94,6 @@ def main():
         if not is_modelable:
             unmodelable.add(ticker)
 
-    # Validate anchors
     for ticker, data in valid_stocks.items():
         if ticker in unmodelable:
             continue
@@ -102,7 +102,6 @@ def main():
         target_mean = targets.get('targetMean')
 
         if data.get('_anchor_suspect') or not target_mean:
-            # Fallback to MA50
             if data['historical'] is not None and len(data['historical']) >= 50:
                 fallback = float(data['historical']['Close'].tail(50).mean())
                 anchor, anchor_warnings = validate_anchor(ticker, fallback, price, "MA50")
@@ -115,10 +114,29 @@ def main():
             all_warnings.extend(anchor_warnings)
 
     # =========================================================
-    # STEP 3: Build correlation matrix
+    # STEP 3: Analyze sentiment (BEFORE MC — Phase 2)
+    # Scores are attached to portfolio_data so MC can use them.
     # =========================================================
-    print("\n🔗 STEP 3: Building correlation matrix...")
+    print("\n🤖 STEP 3: Analyzing sentiment (Claude API)...")
     modelable_data = {t: d for t, d in valid_stocks.items() if t not in unmodelable}
+    try:
+        for ticker, data in modelable_data.items():
+            sentiment = analyze_stock_sentiment(
+                ticker,
+                data['current_price'],
+                data['earnings_date'],
+                data['analyst_grade']
+            )
+            # Attach to portfolio_data so MC can read it
+            portfolio_data[ticker]['sentiment'] = sentiment
+            print(f"   {ticker}: {sentiment['sentiment_score']:.1f} - {sentiment['narrative']}")
+    except Exception as e:
+        print(f"   ⚠️  Sentiment analysis skipped: {e}")
+
+    # =========================================================
+    # STEP 4: Build correlation matrix
+    # =========================================================
+    print("\n🔗 STEP 4: Building correlation matrix...")
     corr_matrix, ticker_order = build_correlation_matrix(modelable_data)
 
     corr_matrix, corr_warnings = validate_correlation_matrix(corr_matrix, ticker_order)
@@ -128,9 +146,9 @@ def main():
     print(f"   Correlation matrix: {corr_matrix.shape} ({len(unmodelable)} stocks excluded)")
 
     # =========================================================
-    # STEP 4: Run Monte Carlo simulations
+    # STEP 5: Run Monte Carlo simulations (with Phase 2 enrichment)
     # =========================================================
-    print("\n🎲 STEP 4: Running Monte Carlo simulations...")
+    print("\n🎲 STEP 5: Running Monte Carlo simulations...")
     simulation_results = simulate_portfolio(modelable_data, corr_matrix, ticker_order, regime_info)
     print(f"   Simulated {len(simulation_results)} stocks")
 
@@ -140,26 +158,6 @@ def main():
     all_warnings.extend(gate3_warnings)
     for w in gate3_warnings:
         print(f"   {w}")
-
-    # =========================================================
-    # STEP 5: Analyze sentiment (optional)
-    # =========================================================
-    print("\n🤖 STEP 5: Analyzing sentiment (Claude API)...")
-    try:
-        sentiment_scores = {}
-        for ticker, data in modelable_data.items():
-            if ticker in simulation_results:
-                sentiment = analyze_stock_sentiment(
-                    ticker,
-                    data['current_price'],
-                    data['earnings_date'],
-                    data['analyst_grade']
-                )
-                sentiment_scores[ticker] = sentiment
-                print(f"   {ticker}: {sentiment['sentiment_score']:.1f} - {sentiment['narrative']}")
-    except Exception as e:
-        print(f"   ⚠️  Sentiment analysis skipped: {e}")
-        sentiment_scores = {}
 
     # =========================================================
     # STEP 6: Generate execution signals
@@ -192,12 +190,13 @@ def main():
 
     # Summary
     print("\n" + "=" * 60)
+    buy_count = sum(1 for d in execution_data.values() if d['signal'] == 'BUY')
+    wait_count = sum(1 for d in execution_data.values() if d['signal'] == 'WAIT')
     print(f"✅ SGC DIP ENGINE - Run Complete")
     print(f"   Stocks modeled: {len(simulation_results)}")
     print(f"   Unmodelable: {len(unmodelable)} ({', '.join(unmodelable) if unmodelable else 'none'})")
     print(f"   Warnings: {len(all_warnings)}")
-    print(f"   BUY: {sum(1 for d in execution_data.values() if d['signal'] == 'BUY')}")
-    print(f"   WAIT: {sum(1 for d in execution_data.values() if d['signal'] == 'WAIT')}")
+    print(f"   BUY: {buy_count} | WAIT: {wait_count}")
     print("=" * 60)
 
     return 0
