@@ -11,11 +11,65 @@ Decision flow:
   3. If dip < 3% → BUY (dip too small to matter at Jesse's position sizes)
   4. If dip >= 3% → WAIT (meaningful dip worth waiting for)
 
+SESSION 2 ENHANCEMENTS:
+  - Post-earnings anchor suppression: suppress_stale_anchor()
+  - Catalyst-aware date formatting: format_date_range() shows earnings/macro dates
+  - process_execution_signals() accepts portfolio_data and macro_events
+
 One-liners describe the dip depth, not a probability number.
 """
 
 from config import MIN_ACTIONABLE_DIP_PCT, PERCENTILE_TARGET
+from config_loader import get_config
 from datetime import datetime, timedelta
+
+
+# =============================================================
+# POST-EARNINGS ANCHOR SUPPRESSION (Session 2)
+# Ref: Build Spec §Session 2 — prevents false signals when
+# analyst targets are stale after earnings gaps
+# =============================================================
+
+def suppress_stale_anchor(stock_data):
+    """
+    Check if stock recently had earnings + large gap.
+    If so, analyst targets are stale — suppress mean reversion.
+
+    Returns: (suppressed: bool, reason: str)
+    """
+    # §Anchor Suppression: check if enabled — config.yaml
+    if not get_config('anchor_suppression', 'enabled', default=False):
+        return False, ''
+
+    earnings_date = stock_data.get('earnings_date')
+    if not earnings_date:
+        return False, ''
+
+    try:
+        if isinstance(earnings_date, str):
+            ed = datetime.strptime(earnings_date, '%Y-%m-%d').date()
+        else:
+            ed = earnings_date
+
+        days_since = (datetime.now().date() - ed).days
+
+        # §Anchor Suppression: lookback_days threshold — config.yaml
+        lookback = get_config('anchor_suppression', 'lookback_days', default=5)
+        if days_since < 0 or days_since > lookback:
+            return False, ''
+
+        # §Anchor Suppression: check for large single-day return
+        hist = stock_data.get('historical')
+        if hist is not None and len(hist) >= 5:
+            recent_returns = hist['Close'].pct_change().tail(lookback).abs()
+            threshold = get_config('anchor_suppression', 'return_threshold', default=0.05)
+            if recent_returns.max() > threshold:
+                return True, f"Post-earnings gap detected ({recent_returns.max():.1%} move within {days_since}d of earnings)"
+
+    except (ValueError, TypeError):
+        pass
+
+    return False, ''
 
 
 def generate_signal(current_price, percentile_low):
@@ -70,20 +124,57 @@ def generate_one_liner(signal, dip_pct, reason_code):
         return f"Moderate {dip_display} dip expected ({conviction}% conviction). Worth waiting."
 
 
-def format_date_range(median_date_index, days_window=7):
-    """Convert simulation day index to calendar date range."""
-    start_date = datetime.now() + timedelta(days=median_date_index - days_window // 2)
-    end_date = datetime.now() + timedelta(days=median_date_index + days_window // 2)
-    if start_date.month == end_date.month:
-        return f"{start_date.strftime('%b')} {start_date.day}-{end_date.day}"
+def format_date_range(median_date_index, days_window=7, earnings_date=None, macro_events=None):
+    """
+    Convert simulation day index to calendar date range.
+    If dip timing aligns with a catalyst, show that instead of generic range.
+    Ref: Build Spec §Session 2 — Honest date buckets with catalyst awareness
+    """
+    today = datetime.now()
+
+    # §Session 2: Check if dip aligns with earnings date
+    if earnings_date:
+        try:
+            if isinstance(earnings_date, str):
+                ed = datetime.strptime(earnings_date, '%Y-%m-%d').date()
+            else:
+                ed = earnings_date
+            earnings_day_index = (ed - today.date()).days
+            if abs(median_date_index - earnings_day_index) <= 3:
+                return f"likely around earnings ({ed.strftime('%b %d')})"
+        except (ValueError, TypeError):
+            pass
+
+    # §Session 2: Check if dip aligns with macro event
+    if macro_events:
+        for event in macro_events:
+            try:
+                event_date = datetime.strptime(event.get('date', '')[:10], '%Y-%m-%d').date()
+                event_day_index = (event_date - today.date()).days
+                if abs(median_date_index - event_day_index) <= 2:
+                    event_name = event.get('event', 'macro event')
+                    return f"likely around {event_name} ({event_date.strftime('%b %d')})"
+            except (ValueError, TypeError):
+                pass
+
+    # Fallback: honest time buckets — rationale.md §format_date_range
+    if median_date_index <= 10:
+        return "within 2 weeks"
+    elif median_date_index <= 30:
+        return "around weeks 2-4"
+    elif median_date_index <= 45:
+        return "around weeks 3-6"
     else:
-        return f"{start_date.strftime('%b %d')}-{end_date.strftime('%b %d')}"
+        return "around weeks 6-8"
 
 
-def process_execution_signals(simulation_results):
+def process_execution_signals(simulation_results, portfolio_data=None, macro_events=None):
     """
     Generate all signals and one-liners for portfolio.
     Returns: dict per ticker with signal, one_liner, date_range, dip_pct
+
+    Session 2: accepts portfolio_data for anchor suppression,
+    macro_events for catalyst-aware date formatting.
     """
     execution_data = {}
 
@@ -96,9 +187,20 @@ def process_execution_signals(simulation_results):
         confidence = result['confidence']
         median_date_index = result['median_date_index']
 
+        # §Session 2: Check for stale anchor (post-earnings suppression)
+        stock_data = portfolio_data.get(ticker, {}) if portfolio_data else {}
+        anchor_suppressed, suppress_reason = suppress_stale_anchor(stock_data)
+
         signal, reason_code, dip_pct = generate_signal(current, target)
         one_liner = generate_one_liner(signal, dip_pct, reason_code)
-        date_range = format_date_range(median_date_index)
+
+        # §Session 2: Pass earnings/macro for catalyst-aware date formatting
+        earnings_date = stock_data.get('earnings_date')
+        date_range = format_date_range(
+            median_date_index,
+            earnings_date=earnings_date,
+            macro_events=macro_events
+        )
 
         execution_data[ticker] = {
             'signal': signal,
@@ -111,6 +213,8 @@ def process_execution_signals(simulation_results):
             'reason_code': reason_code,
             '_extreme_dip': result.get('_extreme_dip', False),
             '_no_dip': result.get('_no_dip', False),
+            '_anchor_suppressed': anchor_suppressed,
+            '_suppress_reason': suppress_reason,
         }
 
     return execution_data
