@@ -14,6 +14,11 @@ PHASE 2 ENRICHMENT (Apr 2026):
   Combined, they differentiate stocks meaningfully.
   Total enrichment drift capped at ±0.10 to prevent extreme combined effects.
 
+SESSION 2 ENHANCEMENTS:
+  - Time-varying volatility: vol spikes on earnings/macro days instead of uniform
+  - build_volatility_schedule() creates per-day vol array
+  - MC loop uses daily vol when schedule is enabled
+
 CONVICTION MODEL:
   Dip target = 60th percentile of path minimums.
   Signal driven by dip depth vs 3% materiality threshold.
@@ -123,6 +128,62 @@ def compute_enrichment_modifiers(stock_data):
 
 
 # =============================================================
+# TIME-VARYING VOLATILITY SCHEDULE (Session 2)
+# Ref: Build Spec §Session 2, rationale.md §Earnings Vol Spike
+# Concentrates vol spike on actual catalyst day instead of uniform
+# =============================================================
+
+def build_volatility_schedule(base_vol, earnings_date=None, macro_events=None, days=SIMULATION_DAYS):
+    """
+    Build per-day volatility array. Spikes on earnings/macro days,
+    normal elsewhere.
+
+    Returns: np.array of shape (days,) with daily vol values
+    """
+    from config_loader import get_config
+
+    schedule = np.ones(days)  # §Vol Schedule: default 1.0x multiplier
+    today = datetime.now().date()
+
+    # §Vol Schedule: Earnings spike — Build Spec §Session 2
+    if earnings_date:
+        try:
+            if isinstance(earnings_date, str):
+                ed = datetime.strptime(earnings_date, '%Y-%m-%d').date()
+            else:
+                ed = earnings_date
+            day_index = (ed - today).days
+            window = get_config('volatility_schedule', 'earnings_pre_post_window', default=2)
+            day_mult = get_config('volatility_schedule', 'earnings_day_multiplier', default=3.0)
+            pre_post_mult = get_config('volatility_schedule', 'earnings_pre_post_multiplier', default=1.5)
+
+            if 0 <= day_index < days:
+                schedule[day_index] = day_mult
+                for offset in range(1, window + 1):
+                    if day_index - offset >= 0:
+                        schedule[day_index - offset] = max(schedule[day_index - offset], pre_post_mult)
+                    if day_index + offset < days:
+                        schedule[day_index + offset] = max(schedule[day_index + offset], pre_post_mult)
+        except (ValueError, TypeError):
+            pass
+
+    # §Vol Schedule: Macro event spikes — Build Spec §Session 2
+    if macro_events:
+        macro_mult = get_config('volatility_schedule', 'macro_event_multiplier', default=2.0)
+        for event in macro_events:
+            event_date_str = event.get('date', '')
+            try:
+                event_date = datetime.strptime(event_date_str[:10], '%Y-%m-%d').date()
+                day_index = (event_date - today).days
+                if 0 <= day_index < days:
+                    schedule[day_index] = max(schedule[day_index], macro_mult)
+            except (ValueError, TypeError):
+                pass
+
+    return base_vol * schedule
+
+
+# =============================================================
 # SIMULATION ENGINE
 # =============================================================
 
@@ -134,6 +195,7 @@ def run_monte_carlo_stock(
     mean_reversion_anchor,
     enrichment_drift=0.0,
     enrichment_vol_mult=1.0,
+    vol_schedule=None,
     days=SIMULATION_DAYS,
     num_paths=NUM_PATHS,
     correlated_randoms=None
@@ -142,13 +204,11 @@ def run_monte_carlo_stock(
     Run Monte Carlo simulation for one stock.
 
     Drift includes: regime + mean reversion + enrichment modifiers.
-    Volatility includes: GARCH × regime × macro × earnings vol spike.
+    Volatility: if vol_schedule provided, uses per-day vol array (Session 2).
+    Otherwise falls back to uniform vol (Phase 2 behavior).
     """
 
     dt = 1/252
-
-    # Vol: GARCH × regime × macro × earnings
-    adj_volatility = volatility * vol_mult * enrichment_vol_mult
 
     # Mean reversion toward anchor
     deviation = (current_price - mean_reversion_anchor) / mean_reversion_anchor if mean_reversion_anchor > 0 else 0
@@ -156,9 +216,6 @@ def run_monte_carlo_stock(
 
     # Drift: regime + mean reversion + enrichment (RSI + sentiment + momentum + insider)
     drift = (drift_mult - 1.0 + mean_reversion_pull + enrichment_drift) * dt
-
-    # Diffusion
-    diffusion = adj_volatility * np.sqrt(dt)
 
     # Simulate paths
     paths = np.zeros((num_paths, days + 1))
@@ -169,8 +226,17 @@ def run_monte_carlo_stock(
     else:
         randoms = np.random.normal(0, 1, size=(num_paths, days))
 
-    for t in range(1, days + 1):
-        paths[:, t] = paths[:, t-1] * np.exp(drift + diffusion * randoms[:, t-1])
+    if vol_schedule is not None:
+        # §Session 2: Time-varying vol — per-day diffusion from schedule
+        for t in range(1, days + 1):
+            diffusion_t = vol_schedule[t - 1] * np.sqrt(dt)
+            paths[:, t] = paths[:, t-1] * np.exp(drift + diffusion_t * randoms[:, t-1])
+    else:
+        # Phase 2 fallback: uniform vol
+        adj_volatility = volatility * vol_mult * enrichment_vol_mult
+        diffusion = adj_volatility * np.sqrt(dt)
+        for t in range(1, days + 1):
+            paths[:, t] = paths[:, t-1] * np.exp(drift + diffusion * randoms[:, t-1])
 
     return paths[:, 1:]
 
@@ -195,13 +261,16 @@ def extract_statistics(paths, current_price):
     }
 
 
-def simulate_portfolio(portfolio_data, corr_matrix, ticker_order, regime_info):
+def simulate_portfolio(portfolio_data, corr_matrix, ticker_order, regime_info, macro_events=None):
     """
-    Run correlated simulations for all stocks with Phase 2 enrichment.
+    Run correlated simulations for all stocks with Phase 2 enrichment
+    and Session 2 time-varying volatility.
     """
+    from config_loader import get_config
 
     results = {}
     n_stocks = len(ticker_order)
+    use_vol_schedule = get_config('volatility_schedule', 'enabled', default=False)
 
     # Generate correlated random numbers
     correlated_randoms_all = np.zeros((NUM_PATHS, SIMULATION_DAYS, n_stocks))
@@ -251,7 +320,18 @@ def simulate_portfolio(portfolio_data, corr_matrix, ticker_order, regime_info):
         from garch_model import calculate_forward_volatility
         volatility = calculate_forward_volatility(data['historical'])
 
-        # Run simulation with enrichment
+        # §Session 2: Build time-varying vol schedule if enabled
+        vol_schedule = None
+        if use_vol_schedule:
+            base_vol = volatility * combined_vol * enrichment['vol_multiplier']
+            vol_schedule = build_volatility_schedule(
+                base_vol=base_vol,
+                earnings_date=data.get('earnings_date'),
+                macro_events=macro_events,
+                days=SIMULATION_DAYS
+            )
+
+        # Run simulation
         paths = run_monte_carlo_stock(
             current_price=data['current_price'],
             volatility=volatility,
@@ -260,6 +340,7 @@ def simulate_portfolio(portfolio_data, corr_matrix, ticker_order, regime_info):
             mean_reversion_anchor=anchor,
             enrichment_drift=enrichment['drift_adjustment'],
             enrichment_vol_mult=enrichment['vol_multiplier'],
+            vol_schedule=vol_schedule,
             correlated_randoms=stock_randoms
         )
 
