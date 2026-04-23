@@ -48,3 +48,4 @@ data/*.json
 # Test outputs
 test_output/
 *.tmp
+src/__pycache__/
