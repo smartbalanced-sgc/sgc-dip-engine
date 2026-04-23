@@ -1,5 +1,5 @@
 """
-Main Orchestrator — SGC Dip Engine v6
+Main Orchestrator — SGC Dip Engine v7
 Pipeline with Phase 2 enrichment:
   Data → GATE 1 → Regimes → GATE 2 → Sentiment → Correlation → MC → GATE 3 → Signals → GATE 4 → Dashboard
 
