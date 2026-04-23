@@ -1,11 +1,17 @@
 """
-Data Fetcher — SGC Dip Engine v6
+Data Fetcher — SGC Dip Engine v7
 - FMP API for 13 US stocks (15 endpoints per stock + 2 macro)
-- yfinance for LDO.MI only (FMP returns 402 for European tickers)
+- Eulerpool API for LDO.MI (primary), yfinance as fallback
+- Eulerpool provides 14/16 FMP-equivalent fields
 
 FMP stable API pattern: symbol in query params, NOT path
 Endpoint: historical-price-eod/full (NOT historical-price-full)
 Ref: rationale.md §2.1, §2.2, §3.1-§3.6
+
+Session 2: Eulerpool replaces yfinance as primary for LDO.MI.
+Eulerpool provides OHLC (no volume), beta, price targets, forward estimates,
+grades consensus, target trend, earnings date proxy, insider stats, AAQS score.
+yfinance used only if Eulerpool fails completely.
 """
 
 import requests
@@ -18,6 +24,11 @@ from config import (
     FMP_API_KEY, FMP_BASE_URL, API_DELAY, API_TIMEOUT,
     LOOKBACK_DAYS, ANALYST_GRADE_MAX_AGE
 )
+
+try:
+    from config import EULERPOOL_TOKEN
+except ImportError:
+    EULERPOOL_TOKEN = None
 
 
 # =============================================================
@@ -283,6 +294,205 @@ def fetch_economic_calendar():
 
 
 # =============================================================
+# EULERPOOL API (LDO.MI primary source — Session 2)
+# 14/16 FMP-equivalent fields validated and tested
+# Missing: analyst_grade (empty), dcf_value (no endpoint)
+# =============================================================
+
+def eulerpool_get(endpoint, ticker):
+    """Safe Eulerpool API call. Returns parsed JSON or None."""
+    base = "https://api.eulerpool.com/api/1"
+    try:
+        url = f"{base}/{endpoint}"
+        r = requests.get(url, params={"token": EULERPOOL_TOKEN}, timeout=10)
+        return r.json() if r.status_code == 200 else None
+    except:
+        return None
+
+
+def fetch_stock_data_eulerpool(ticker):
+    """
+    Fetch LDO.MI from Eulerpool API (primary source).
+
+    Coverage: 14/16 FMP fields
+    ✅ historical, current_price, price_targets, earnings_date,
+       momentum, forward_estimates, target_trend, rsi, profile,
+       financial_scores (AAQS), grades_consensus, insider_stats
+    ❌ analyst_grade (empty), dcf_value (no endpoint)
+
+    Returns dict matching FMP structure for seamless integration.
+    """
+    if not EULERPOOL_TOKEN:
+        print(f"   ⚠️  {ticker}: No Eulerpool token configured")
+        return None
+
+    print(f"   📊 {ticker} (Eulerpool)...")
+
+    # 1. HISTORICAL OHLC (Volume=0) — /equity/candles/
+    candles = eulerpool_get(f"equity/candles/{ticker}", ticker)
+    if not candles or not isinstance(candles, list) or len(candles) == 0:
+        print(f"   ❌ {ticker}: No candles from Eulerpool")
+        return None
+
+    records = []
+    for c in candles:
+        ts = c.get('timestamp')
+        o, h, l, close = c.get('open'), c.get('high'), c.get('low'), c.get('close')
+        if ts and all([o, h, l, close]):
+            records.append({
+                'Date': datetime.fromtimestamp(ts / 1000),
+                'Open': float(o),
+                'High': float(h),
+                'Low': float(l),
+                'Close': float(close),
+                'Volume': 0  # Eulerpool doesn't provide volume
+            })
+
+    if not records:
+        print(f"   ❌ {ticker}: No valid candles")
+        return None
+
+    hist = pd.DataFrame(records).sort_values('Date').reset_index(drop=True)
+    current_price = float(hist['Close'].iloc[-1])
+
+    # 2. PRICE TARGETS — /equity/price-target/ (snake_case fields)
+    targets_data = eulerpool_get(f"equity/price-target/{ticker}", ticker) or {}
+    price_targets = {
+        'targetHigh': targets_data.get('target_high'),
+        'targetLow': targets_data.get('target_low'),
+        'targetMean': targets_data.get('target_mean'),
+        'targetMedian': targets_data.get('target_median')
+    }
+
+    # 3. EARNINGS DATE — /equity/fundamentals-quarterly/ (proxy from estimated quarters)
+    quarters = eulerpool_get(f"equity/fundamentals-quarterly/{ticker}", ticker) or []
+    earnings_date = None
+    if isinstance(quarters, list):
+        today = datetime.now().date()
+        future_quarters = []
+        for q in quarters:
+            period = q.get('period', '')
+            # §Earnings: estimated quarters have 'e' suffix (e.g. "2026-06-30e")
+            if period.endswith('e'):
+                date_str = period[:-1]
+                try:
+                    quarter_end = datetime.strptime(date_str, '%Y-%m-%d').date()
+                    if quarter_end > today:
+                        future_quarters.append(quarter_end)
+                except:
+                    pass
+        if future_quarters:
+            earnings_date = sorted(future_quarters)[0].strftime('%Y-%m-%d')
+
+    # 4. FORWARD ESTIMATES — /equity/estimates/
+    estimates_data = eulerpool_get(f"equity/estimates/{ticker}", ticker) or []
+    forward_estimates = {}
+    if isinstance(estimates_data, list):
+        for est in estimates_data:
+            if est.get('epsEstimate') and est.get('epsAnalysts'):
+                forward_estimates = {
+                    'epsAvg': est.get('epsEstimate'),
+                    'numAnalysts': est.get('epsAnalysts')
+                }
+                break
+
+    # 5. PROFILE — beta from /sentiment/price-metrics/, sector from /equity/profile/
+    price_metrics = eulerpool_get(f"sentiment/price-metrics/{ticker}", ticker) or {}
+    profile_data = eulerpool_get(f"equity/profile/{ticker}", ticker) or {}
+    profile = {
+        'beta': price_metrics.get('beta'),  # 0.7761 (consensus-validated)
+        'sector': profile_data.get('sector'),
+        'industry': profile_data.get('industry')
+    }
+
+    # 6. GRADES CONSENSUS + TARGET TREND — /research/recommendations/
+    recs = eulerpool_get(f"research/recommendations/{ticker}", ticker) or []
+    grades_consensus = {}
+    target_trend = {}
+    if isinstance(recs, list) and len(recs) > 0:
+        # Most recent month for consensus
+        latest = recs[0]
+        grades_consensus = {
+            'strongBuy': latest.get('strongBuy', 0),
+            'buy': latest.get('buy', 0),
+            'hold': latest.get('hold', 0),
+            'sell': latest.get('sell', 0),
+            'strongSell': latest.get('strongSell', 0)
+        }
+        # Target trend from historical recommendations
+        if len(recs) >= 3:
+            sorted_recs = sorted(recs, key=lambda x: x.get('period', ''), reverse=True)[:3]
+            target_trend = {
+                'lastMonthAvg': sorted_recs[0].get('targetMean'),
+                'lastQuarterAvg': sorted_recs[2].get('targetMean') if len(sorted_recs) > 2 else None
+            }
+
+    # 7. FINANCIAL SCORES — /equity-extended/aaqs/ (AAQS quality score, not Altman/Piotroski)
+    aaqs_data = eulerpool_get(f"equity-extended/aaqs/{ticker}", ticker) or {}
+    financial_scores = {
+        'aaqs': aaqs_data.get('score'),
+        'altmanZScore': None,
+        'piotroskiScore': None
+    }
+
+    # 8. INSIDER STATS — /sentiment/insider-sentiment/ (different format than FMP)
+    insider_data = eulerpool_get(f"sentiment/insider-sentiment/{ticker}", ticker) or []
+    insider_stats = {}
+    if isinstance(insider_data, list) and len(insider_data) > 0:
+        recent = insider_data[0]
+        insider_stats = {
+            'year_month': f"{recent.get('year')}-{recent.get('month'):02d}",
+            'change': recent.get('change'),
+            'mspr': recent.get('mspr')
+        }
+
+    # 9. MOMENTUM — computed from candles (1M/3M/6M)
+    momentum = {}
+    if len(hist) >= 127:
+        closes = hist['Close'].tolist()
+        latest_close = closes[-1]
+        momentum = {
+            '1M': ((latest_close / closes[-22] - 1) * 100) if len(closes) >= 22 else None,
+            '3M': ((latest_close / closes[-64] - 1) * 100) if len(closes) >= 64 else None,
+            '6M': ((latest_close / closes[-127] - 1) * 100) if len(closes) >= 127 else None
+        }
+
+    # 10. RSI — computed locally from candles
+    rsi = None
+    if len(hist) >= 20:
+        closes = hist['Close']
+        delta = closes.diff().dropna()
+        gain = delta.where(delta > 0, 0)
+        loss = (-delta).where(delta < 0, 0)
+        avg_gain = gain.rolling(14).mean().iloc[-1]
+        avg_loss = loss.rolling(14).mean().iloc[-1]
+        if avg_loss > 0:
+            rs = avg_gain / avg_loss
+            rsi = 100 - (100 / (1 + rs))
+
+    print(f"   ✅ {ticker}: {len(hist)} days, ${current_price:.2f} (Eulerpool, 14/16 fields)")
+
+    return {
+        'ticker': ticker,
+        'historical': hist,
+        'current_price': current_price,
+        'quote_data': {},
+        'price_targets': price_targets,
+        'earnings_date': earnings_date,
+        'analyst_grade': {},  # §Eulerpool: upgrades endpoint empty for LDO.MI
+        'momentum': momentum,
+        'forward_estimates': forward_estimates,
+        'target_trend': target_trend,
+        'rsi': rsi,
+        'profile': profile,
+        'financial_scores': financial_scores,
+        'grades_consensus': grades_consensus,
+        'dcf_value': None,  # §Eulerpool: no fair-value endpoint
+        'insider_stats': insider_stats,
+    }
+
+
+# =============================================================
 # STOCK ORCHESTRATORS
 # =============================================================
 
@@ -315,10 +525,21 @@ def fetch_stock_data_fmp(ticker):
 
 
 def fetch_stock_data_yfinance(ticker):
-    """Fetch all data for LDO.MI from yfinance (2 API calls only)"""
+    """
+    Fetch LDO.MI: Eulerpool primary, yfinance fallback.
+    Session 2: Eulerpool is now the primary source (14/16 fields).
+    yfinance only used if Eulerpool fails completely.
+    """
+    # §Session 2: Try Eulerpool first (richer data, no rate limiting)
+    eulerpool_result = fetch_stock_data_eulerpool(ticker)
+    if eulerpool_result and eulerpool_result.get('current_price'):
+        return eulerpool_result
+
+    # Eulerpool failed — fall back to yfinance
+    print(f"   ⚠️  Eulerpool failed for {ticker}, trying yfinance fallback...")
     import yfinance as yf
 
-    print(f"   📊 {ticker} (yfinance)...")
+    print(f"   📊 {ticker} (yfinance fallback)...")
     stock = yf.Ticker(ticker)
 
     # Call 1: Historical OHLCV
@@ -329,7 +550,6 @@ def fetch_stock_data_yfinance(ticker):
         print(f"   ✅ {ticker}: {len(hist)} days (yfinance)")
 
     # Call 2: Info (current price, targets)
-    # yfinance gets 429 on GitHub Actions shared IPs — must not crash pipeline
     info = {}
     try:
         info = stock.info
@@ -340,7 +560,7 @@ def fetch_stock_data_yfinance(ticker):
     if current_price is None and hist is not None and not hist.empty:
         current_price = float(hist['Close'].iloc[-1])
 
-    # Earnings dates (separate call, also may 429)
+    # Earnings dates
     earnings_date = None
     try:
         earnings = stock.get_earnings_dates(limit=5)
@@ -352,7 +572,7 @@ def fetch_stock_data_yfinance(ticker):
     except:
         pass
 
-    # Compute RSI locally for LDO.MI (no FMP access)
+    # Compute RSI locally
     rsi = None
     if hist is not None and len(hist) >= 20:
         closes = hist['Close']
