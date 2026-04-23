@@ -12,57 +12,92 @@
 
 A Monte Carlo simulation engine that runs 10,000 correlated price paths per stock over a 60-day horizon. For each stock, it finds the dip level that 60% of simulated futures reach. If that dip is deep enough to matter (≥3%), it tells you to WAIT. If not, it tells you to BUY now.
 
-The investor DCA's into these 14 stocks monthly regardless. The stocks are already chosen by the Portfolio Constitution. This engine optimises *entry timing*, not *stock selection*.
+The simulation is informed by 7 layers of data: macro regime, 2 years of price history, GARCH volatility, per-stock regime detection, cross-stock correlation, AI sentiment analysis, and five enrichment signals (RSI, momentum, insider activity, earnings proximity).
+
+The investor DCA's into these 14 stocks monthly regardless. This engine optimises *entry timing*, not *stock selection*.
 
 ## What This Is NOT
 
-- **Not a stock picker.** It does not evaluate whether a stock deserves to be in the portfolio.
-- **Not a trading bot.** It generates signals on a static HTML page. The investor decides and executes manually.
-- **Not a guarantee.** It models the normal statistical behaviour of stock prices. It cannot predict earnings surprises, tariff announcements, or CEO resignations.
-- **Not backtested.** As of initial deployment, the model has zero historical track record. Calibration comes from observing live output vs actual prices over the first 2-4 weeks.
+- **Not a stock picker.** Does not evaluate whether a stock deserves to be in the portfolio.
+- **Not a trading bot.** Generates signals on a static HTML page. The investor decides and executes manually.
+- **Not a guarantee.** Models the normal statistical behaviour of stock prices. Cannot predict surprise events.
+- **Not backtested.** Calibration comes from observing live output vs actual prices over the first 2-4 weeks.
 
 ---
 
 ## How The Signal Works (Plain English)
 
-For each stock, the model simulates 10,000 possible price futures over 60 days using the stock's own volatility, trend regime, correlation with other stocks, and mean reversion toward analyst price targets.
+For each stock, the model simulates 10,000 possible price futures over 60 days using:
 
-It then finds the **dip level that 60% of those futures reach**. This is the "realistic dip" — not an extreme crash, not a tiny blip, but the level the stock has a good chance of hitting.
+- The stock's own GARCH volatility (how much it typically swings)
+- Its current regime (bull, sideways, or drawdown)
+- Correlation with other portfolio stocks (they move together)
+- Mean reversion toward analyst price targets (stocks tend to drift toward consensus)
+- **RSI** — overbought stocks drift down, oversold stocks drift up
+- **AI sentiment** — Claude API scores bearish/bullish narrative
+- **Momentum** — stocks that ripped up tend to pull back (contrarian)
+- **Insider activity** — heavy insider selling pushes drift down
+- **Earnings proximity** — imminent earnings widen volatility
 
-Then it asks one question: **"Is that dip deep enough to be worth waiting for?"**
+It then finds the **dip level that 60% of those futures reach** and asks: **"Is that dip ≥ 3%?"**
 
-- **Dip ≥ 3%** → WAIT. The potential savings justify patience.
-- **Dip < 3%** → BUY. The dip is too shallow to matter on these position sizes.
+- **Yes** → WAIT. The potential savings justify patience.
+- **No** → BUY. The dip is too shallow to matter at these position sizes.
 
-The 3% materiality threshold exists because on a £35-£75 monthly position, a 2% dip saves £0.70-£1.50. Not worth the risk of the stock running up while you wait.
+---
 
-### Examples
+## Phase 2 Enrichment Modifiers (Implemented)
 
-**NVDA — $202, RSI 70, beta 2.3 (volatile, overbought)**
-60% of simulated paths dip to $188 or lower. That's a 6.9% dip.
-→ **WAIT** — "Strong 6.9% dip expected. Be patient."
+Five data streams feed into the Monte Carlo simulation, modifying drift and volatility per stock:
 
-**WM — $224, RSI 38, beta 0.65 (stable, oversold)**
-60% of simulated paths dip to $220 or lower. That's a 1.8% dip.
-→ **BUY** — "Expected dip only 1.8% — not worth waiting. Buy today."
+| Modifier | Source | Effect | Scale |
+|----------|--------|--------|-------|
+| RSI | FMP `technical-indicators/rsi` | Overbought (>70) pushes drift down; oversold (<30) pushes drift up | (50 - RSI) / 500 |
+| Sentiment | Claude API | Bearish score pushes drift down; bullish pushes up | score / 100 |
+| Momentum | FMP `stock-price-change` | Strong positive 1M momentum → contrarian drag | -momentum / 1000 |
+| Insider | FMP `insider-trading/statistics` | Heavy selling → drift down; net buying → drift up | (ratio - 0.5) / 25, capped ±0.03 |
+| Earnings | FMP `earnings` | Imminent earnings → vol spike | ≤14d: ×1.5, ≤30d: ×1.3, ≤60d: ×1.15 |
 
-**MA — $510, RSI 51, beta 1.1 (moderate)**
-60% of simulated paths dip to $494 or lower. That's a 3.1% dip.
-→ **WAIT** — "Moderate 3.1% dip expected. Worth waiting."
+Total enrichment drift is capped at ±0.10 to prevent extreme combined effects from overwhelming the regime drift.
 
-The same conviction level (60%) produces different dip depths because each stock has different volatility, regime, and mean reversion characteristics. Volatile stocks produce deep dips. Stable stocks produce shallow ones. The materiality filter then decides whether the dip is worth waiting for.
+### Example: NVDA (RSI 70, sentiment +2, momentum +17%, insider ratio 0.16, earnings in 27 days)
+
+```
+RSI:        (50 - 70) / 500     = -0.040  (overbought → dip likely)
+Sentiment:  2 / 100             = +0.020  (mildly bullish)
+Momentum:   -17.3 / 1000        = -0.017  (contrarian drag)
+Insider:    (0.163 - 0.5) / 25  = -0.013  (heavy selling)
+                                  -------
+Total drift adjustment:           -0.050  (net bearish)
+Earnings vol: 27 days away        × 1.30  (vol spike)
+```
+
+vs WM (RSI 38, sentiment 0, momentum +1.2%, balanced insiders, earnings in 5 days)
+
+```
+RSI:        (50 - 38) / 500     = +0.024  (oversold → bounce likely)
+Sentiment:  0 / 100             = +0.000
+Momentum:   -1.2 / 1000         = -0.001
+Insider:    (0.5 - 0.5) / 25    = +0.000
+                                  -------
+Total drift adjustment:           +0.023  (net bullish)
+Earnings vol: 5 days away         × 1.50  (big vol spike)
+```
+
+NVDA gets a bearish drift push → deeper dip target → WAIT.
+WM gets a bullish drift push → shallower dip target → more likely BUY.
 
 ---
 
 ## The Conviction Dial
 
-The 60% conviction level is set in `config.py` as `PERCENTILE_TARGET = 60`. It means: "Show me the dip that 60% of simulated futures reach."
+Set in `config.py` as `PERCENTILE_TARGET = 60`. Means: "Show me the dip that 60% of simulated futures reach."
 
-- **Higher (70%)** = shallower dips, more certainty they happen. Model says BUY more often.
-- **Lower (50%)** = deeper dips, less certainty. Model says WAIT more often but dips may not materialise.
-- **60%** = balanced. Dips are likely enough to wait for, deep enough to save real money.
+- **Higher (70%)** = shallower dips, more certainty. Model says BUY more often.
+- **Lower (50%)** = deeper dips, less certainty. Model says WAIT more often.
+- **60%** = balanced starting point for an unbacktested model.
 
-The conviction level can be adjusted after observing live performance. If the model's WAIT signals consistently lead to dips that are reached, consider lowering to 55%. If dips are frequently missed, raise to 65%.
+Adjust after 2-4 weeks of live observation.
 
 ---
 
@@ -70,123 +105,74 @@ The conviction level can be adjusted after observing live performance. If the mo
 
 ```
 Layer 0  MACRO REGIME
-         FMP quote for VIX + SPY → bull/neutral/stress classification.
-         Adjusts volatility and correlation multipliers for all stocks.
+         FMP quote for VIX + SPY → risk_on / neutral / risk_off.
+         Adjusts vol and correlation multipliers for all stocks.
 
 Layer 1  DATA INGESTION
          FMP API (15 endpoints per US stock) + yfinance (LDO.MI only).
-         Fetches: OHLCV, price, targets, earnings, grades, momentum,
-         forward EPS, target trends, RSI, beta, financial scores,
-         grades consensus, DCF intrinsic value, insider trading stats.
-         Also: economic calendar (Fed/CPI/jobs dates, 1 call total).
+         Economic calendar (1 call).
 
 Layer 2  STATISTICAL ENGINE
-         GARCH(1,1) → per-stock forward volatility estimate.
+         GARCH(1,1) → per-stock forward volatility.
          Simplified HMM → per-stock regime (bull/sideways/drawdown).
 
-Layer 3  CORRELATION
-         Correlation matrix from 2yr daily returns.
-         Cholesky decomposition → correlated random numbers.
-         Stocks simulated jointly, not independently.
+Layer 3  AI INTELLIGENCE
+         Claude API sentiment per stock (-5 to +5).
+         Runs BEFORE MC so scores feed into simulation.
 
-Layer 4  MONTE CARLO SIMULATION
-         10,000 correlated price paths × 60 days per stock.
-         Drift = regime adjustment + mean reversion toward analyst target.
-         Volatility = GARCH × stock regime × macro regime multiplier.
-         Output: 60th percentile of path minimums = "realistic dip level".
+Layer 4  CORRELATION
+         Correlation matrix from 2yr returns → Cholesky decomposition.
+         Stocks simulated jointly.
 
-Layer 5  AI INTELLIGENCE
-         Claude API sentiment per stock.
-         Cross-validates with analyst grade actions.
+Layer 5  MONTE CARLO SIMULATION
+         10,000 correlated paths × 60 days.
+         Drift = regime + mean reversion + RSI + sentiment + momentum + insider.
+         Vol = GARCH × regime × macro × earnings proximity.
+         Output: 60th percentile of minimums = "realistic dip level".
 
 Layer 6  EXECUTION LOGIC
-         Calculate dip depth = (current - target) / current.
-         If dip < 3%: BUY (immaterial). If dip ≥ 3%: WAIT.
-         One-liners describe dip depth, not probability.
+         Dip ≥ 3% → WAIT. Dip < 3% → BUY.
+         One-liners describe dip depth.
 
 Layer 7  DASHBOARD
-         Static HTML to GitHub Pages. Dark theme. Warning banner
-         if any guardrails were tripped. BUY signals shown first.
+         Static HTML to GitHub Pages. Warning banner if guardrails tripped.
+         BUY signals first, WAIT sorted by deepest dip.
 ```
 
 ---
 
 ## Four-Gate Validation Pipeline
 
-Every run passes through four validation gates. If data is corrupt or model outputs are nonsensical, the dashboard shows warnings rather than false-precision signals.
+### Gate 1: Input Data Quality
+Price positive, non-NaN. Price cross-check (quote vs last close < 3%). History: warn < 200 rows, skip < 50. Freshness within 5 trading days. Return outlier scan (> 20%). Volume > 100K. Analyst target 0.5x–2.5x. NaN check.
 
-### Gate 1: Input Data Quality (after fetch)
-- Price must be positive and non-NaN
-- Price cross-check: quote vs last historical close (< 3% divergence)
-- Historical data: warn < 200 rows, skip < 50 rows
-- Freshness: last data point within 5 trading days
-- Single-day return outlier scan (> 20% flagged)
-- Volume: mean daily > 100,000
-- Analyst target: must be 0.5x–2.5x current price, else fallback
-- NaN check on all numeric fields
+### Gate 2: Model Output Sanity
+GARCH vol > 150% → unmodelable. Stationarity: alpha + beta > 0.95 → warn. Anchor 0.5x–2.5x or fallback. Correlation no off-diagonal > 0.98. NaN check.
 
-### Gate 2: Model Output Sanity (after GARCH/HMM)
-- GARCH annualized vol > 150% → stock marked "unmodelable"
-- GARCH stationarity: alpha + beta > 0.95 → warn
-- Mean reversion anchor: must be 0.5x–2.5x current price
-- Correlation matrix: no off-diagonal > 0.98
-- NaN check on all model outputs
+### Gate 3: Simulation Output Sanity
+Paths NOT capped. Dip > 30% → flagged extreme. Target ≥ current → no dip expected. NaN check.
 
-### Gate 3: Simulation Output Sanity (after MC)
-- Individual paths NOT capped (fat tails are features)
-- Dip > 30% below current → flagged as extreme (not clamped)
-- Dip target ≥ current price → "no dip expected", signal BUY
-- NaN check on all MC outputs
-
-### Gate 4: Portfolio-Level Coherence (after signals)
-- VIX < 5 or > 80 → flag data suspect
-- All stocks same signal → flag
-- Fewer than 10 valid stocks → degraded dashboard
-- 0 valid stocks → error page
+### Gate 4: Portfolio-Level Coherence
+VIX < 5 or > 80 → flag. All same signal → flag. < 10 valid stocks → degraded. 0 → error page.
 
 ---
 
-## Data Sources
+## Data Sources & API Costs Per Run
 
-### FMP API (13 US stocks — 15 endpoints per stock)
-| # | Endpoint | Used For |
-|---|----------|----------|
-| 1 | `historical-price-eod/full` | GARCH, HMM, correlation |
-| 2 | `quote` | Current price, fallback anchor |
-| 3 | `price-target-consensus` | MC mean reversion anchor |
-| 4 | `earnings` | Sentiment context |
-| 5 | `grades` | Sentiment modifier |
-| 6 | `stock-price-change` | Future: MC drift modifier |
-| 7 | `analyst-estimates` | Future: anchor confidence |
-| 8 | `price-target-summary` | Future: anchor direction |
-| 9 | `technical-indicators/rsi` | Dashboard display |
-| 10 | `profile` | Beta display, future: vol calibration |
-| 11 | `financial-scores` | Future: distress filter |
-| 12 | `grades-consensus` | Future: sentiment enrichment |
-| 13 | `discounted-cash-flow` | Future: second anchor |
-| 14 | `insider-trading/statistics` | Future: MC drift modifier |
-| 15 | `economic-calendar` | Future: macro vol spike |
-
-### yfinance (LDO.MI only — 2 calls)
-FMP returns HTTP 402 for European tickers. yfinance provides OHLCV and current price for Leonardo (Milan exchange) in EUR. May return 429 on GitHub Actions shared IPs — pipeline degrades gracefully.
-
-### Anthropic Claude API (sentiment)
-Per-stock sentiment scoring (-5 to +5) with one-sentence narrative. Cross-validates against analyst grade actions.
-
-### API Costs Per Run
-- FMP: ~185 calls (within 300/min Starter plan limit), $22/mo plan
-- Anthropic: ~14 calls, ~$0.10-0.15/run (~$2-3/mo)
-- yfinance: 2-3 calls, free
+| Source | Calls | Cost |
+|--------|-------|------|
+| FMP (13 US stocks × 14 endpoints + 2 macro + 1 calendar) | ~185 | $22/mo plan |
+| Anthropic Claude (sentiment per stock) | ~14 | ~$0.10-0.15/run |
+| yfinance (LDO.MI only) | 2-3 | Free |
 
 ---
 
 ## Known Weaknesses
 
-1. **Post-earnings anchor staleness.** After earnings, analyst targets take days to update. Model may underestimate dip probability. Apply judgment after earnings events.
-2. **No time-decay.** Treats day 1 and day 59 identically. Planned enhancement.
-3. **No backtest.** Model is unvalidated. Watch the 14-day signal grid for calibration after 2-4 weeks.
-4. **Sentiment not wired into MC.** Claude scores are generated but don't modify the simulation. Planned enhancement.
-5. **New data endpoints fetched but not yet wired into MC.** RSI, beta, momentum, insider stats, DCF, economic calendar are displayed but don't modify simulation paths. Phase 2 enhancement.
+1. **Post-earnings anchor staleness.** After earnings, analyst targets lag. Model may underestimate dip probability for a few days. Apply judgment after earnings events.
+2. **No time-decay.** Treats day 1 and day 59 identically. Planned Phase 3 enhancement.
+3. **No backtest.** Model is unvalidated. Watch the signal grid for calibration after 2-4 weeks.
+4. **LDO.MI may fail.** yfinance gets 429 on GitHub Actions. Pipeline degrades gracefully but LDO.MI may show as SKIPPED.
 
 ---
 
@@ -218,19 +204,19 @@ sgc-dip-engine/
 ├── .github/workflows/
 │   └── daily_run.yml        # Cron: 9:30 PM BST weekdays
 ├── docs/
-│   └── index.html           # Dashboard output (GitHub Pages)
+│   └── index.html           # Dashboard (GitHub Pages)
 ├── src/
-│   ├── config.py            # All thresholds, conviction dial, portfolio
+│   ├── config.py            # Thresholds, conviction dial, portfolio
 │   ├── validators.py        # 4-gate validation pipeline
-│   ├── data_fetcher.py      # FMP (15 endpoints) + yfinance (LDO.MI)
-│   ├── macro_regime.py      # VIX/SPY → risk_on/neutral/risk_off
-│   ├── garch_model.py       # GARCH(1,1) volatility forecasting
-│   ├── hmm_regime.py        # Simplified regime detection
-│   ├── correlation.py       # Correlation matrix + Cholesky
-│   ├── monte_carlo.py       # 10K correlated MC paths + 60th pct target
-│   ├── sentiment.py         # Claude API sentiment per stock
-│   ├── execution_logic.py   # BUY/WAIT based on dip depth vs 3%
-│   ├── dashboard_generator.py # HTML with warnings, BUY-first sort
+│   ├── data_fetcher.py      # FMP (15 endpoints) + yfinance
+│   ├── macro_regime.py      # VIX/SPY regime classification
+│   ├── garch_model.py       # GARCH(1,1) volatility
+│   ├── hmm_regime.py        # Regime detection
+│   ├── correlation.py       # Correlation + Cholesky
+│   ├── monte_carlo.py       # MC engine + enrichment modifiers
+│   ├── sentiment.py         # Claude API sentiment
+│   ├── execution_logic.py   # BUY/WAIT on dip depth vs 3%
+│   ├── dashboard_generator.py # HTML + warnings + sort
 │   └── main.py              # Orchestrator (7 steps + 4 gates)
 ├── requirements.txt
 ├── .gitignore
@@ -239,55 +225,39 @@ sgc-dip-engine/
 
 ---
 
-## How To Run
-
-### Local (Mac terminal)
-```bash
-cd src
-pip install -r ../requirements.txt
-export FMP_API_KEY="your_key"
-export ANTHROPIC_API_KEY="your_key"
-python main.py
-# Dashboard output: ../docs/index.html
-```
-
-### GitHub Actions (automated)
-Runs daily at 9:30 PM BST via `.github/workflows/daily_run.yml`.
-Secrets required: `FMP_API_KEY`, `ANTHROPIC_API_KEY`.
-
----
-
 ## Defense of the Approach
 
 ### Why dip depth, not probability?
-Every stock dips below its current price at some point in 60 days — that's a mathematical property of random walks. Asking "will it dip?" is trivially true. Asking "will it dip enough to matter?" is the useful question. The materiality threshold (3%) converts a statistical exercise into an actionable decision.
+Every stock dips below its current price in 60 days — that's random walk math. Asking "will it dip?" is trivially true. Asking "will it dip enough to matter?" is the useful question.
 
-### Why 60% conviction, not higher or lower?
-At 70%, the model only shows shallow dips and says BUY too often — you'd miss pullbacks. At 50%, you're acting on coin-flip signals with an unproven model. 60% gives a buffer: if the model is slightly miscalibrated (likely, since it's new), you still get 53-57% real-world accuracy. That's a profitable edge for DCA timing.
+### Why 60% conviction?
+At 70%, only shallow dips show — model says BUY too often. At 50%, signals are coin flips on an unproven model. 60% gives a buffer for miscalibration.
 
 ### Why 3% materiality?
-On £500/month across 14 stocks, the largest position (NVDA at 15%) gets £75. A 3% better entry saves £2.25. Across 14 stocks and 12 months, that's £100-200/year in better entries. Compounded over 22 years at 13% CAGR, that's £7,000-8,000 in additional terminal value. Below 3%, the savings don't compound into meaningful amounts.
+On £500/month, a 3% better entry across 14 stocks and 12 months compounds to £7,000-8,000 over 22 years at 13% CAGR. Below 3%, savings don't compound meaningfully.
 
-### Why Monte Carlo, not rules-based?
-Rules ("buy when RSI < 30") are brittle and backward-looking. MC simulation incorporates volatility clustering (GARCH), regime shifts (HMM), cross-stock correlation (Cholesky), and mean reversion simultaneously. The output is a distribution, not a binary rule.
+### Why enrichment modifiers are small?
+Each modifier (±0.01 to ±0.05) is conservative. The model is unbacktested — aggressive modifiers could swing signals incorrectly. Better to under-correct and observe, then tune coefficients based on live performance.
 
-### Why not clamp Monte Carlo paths?
-Clamping suppresses tail risk — the very thing that causes real dips. Fat tails are features, not bugs. If a stock has beta 2.3 and the market drops 7%, a 16% single-day move is plausible. Capping that would systematically underestimate dip probability.
+### Why cap total enrichment at ±0.10?
+Without the cap, a stock with RSI 80 + bearish sentiment + strong momentum + heavy insider selling could accumulate -0.15 enrichment drift, overwhelming the regime signal. The cap ensures enrichment *informs* the simulation without *dominating* it.
 
 ---
 
-## Enhancement Roadmap (Post-Deployment)
+## Enhancement Roadmap
 
-| Phase | Enhancement |
-|-------|------------|
-| 2a | Wire RSI into MC drift (overbought → increase dip probability) |
-| 2b | Wire momentum into MC drift |
-| 2c | Wire insider stats into MC drift |
-| 2d | Wire earnings date into MC vol spike |
-| 2e | Wire economic calendar into MC vol spike |
-| 2f | Wire DCF as second anchor with conflict resolution |
-| 2g | Wire sentiment score into MC drift |
-| 2h | Enrich Claude prompt with all new data |
-| 3a | Post-earnings anchor suppression |
-| 3b | Time-decay deployment urgency |
-| 3c | Backtest scaffold |
+| Phase | Enhancement | Status |
+|-------|------------|--------|
+| 2a | RSI → MC drift | ✅ Implemented |
+| 2b | Momentum → MC drift | ✅ Implemented |
+| 2c | Insider stats → MC drift | ✅ Implemented |
+| 2d | Earnings date → MC vol spike | ✅ Implemented |
+| 2e | Sentiment → MC drift | ✅ Implemented |
+| 2f | Sentiment moved before MC in pipeline | ✅ Implemented |
+| 2g | Enrichment modifier logging | ✅ Implemented |
+| 2h | Economic calendar → MC vol spike | Planned |
+| 2i | DCF as second anchor with conflict resolution | Planned |
+| 2j | Enrich Claude prompt with RSI/momentum/insider data | Planned |
+| 3a | Post-earnings anchor suppression | Planned |
+| 3b | Time-decay deployment urgency | Planned |
+| 3c | Backtest scaffold | Planned |
