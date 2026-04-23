@@ -1,5 +1,5 @@
 """
-Backtest Framework — SGC Dip Engine v6
+Backtest Framework — SGC Dip Engine v7
 
 Compares historical WAIT signals against actual price outcomes.
 Did stocks that were predicted to dip actually dip to their targets?
