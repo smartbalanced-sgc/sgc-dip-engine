@@ -54,15 +54,15 @@ portfolio:
 # ----------------------------------------------------------------------------
 signal:
   # Conviction dial: what percentile of MC paths to use for dip target
-  # 60 = show dip that 60% of paths reach
-  # Higher = shallower dips (more certain), Lower = deeper dips (less certain)
-  # Range: 50-80 recommended, 60 is balanced
+  # 60 = show dip that 60% of paths reach (primary signal)
   percentile_target: 60
   
+  # Fallback percentile for high-conviction alternative
+  # 80 = show dip that 80% of paths reach (higher certainty, shallower dip)
+  fallback_percentile: 80
+  
   # Materiality threshold: minimum dip worth waiting for
-  # If predicted dip < this %, signal BUY (not worth waiting)
-  # 0.03 = 3% threshold
-  # On £500/mo positions, 3% is where savings compound meaningfully
+  # Applies to both primary and fallback signals
   min_actionable_dip_pct: 0.03
 
 # ----------------------------------------------------------------------------
