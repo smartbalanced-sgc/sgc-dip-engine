@@ -15,13 +15,14 @@ import os
 from config import OUTPUT_DIR, OUTPUT_FILE, PERCENTILE_TARGET
 
 
-def get_currency_symbol(ticker):
-    """Return currency symbol based on ticker exchange suffix."""
-    if ticker.endswith('.MI') or ticker.endswith('.PA') or ticker.endswith('.DE'):
+def get_currency_symbol(ticker, portfolio_data=None):
+    """Return € for European stocks and ASML (displayed in EUR), £ for UK, $ otherwise."""
+    if ticker.endswith('.MI') or ticker == 'ASML':  # Session 3: ASML displays in EUR
         return '€'
     elif ticker.endswith('.L'):
         return '£'
-    return '$'
+    else:
+        return '$'
 
 
 def generate_html(execution_data, macro_regime, vix, portfolio_data,
