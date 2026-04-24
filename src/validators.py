@@ -101,6 +101,10 @@ def validate_input_data(portfolio_data):
                 warnings.append(f"{ticker}: {len(outliers)} moves over {RETURN_OUTLIER_PCT*100:.0f}% (max {worst*100:.0f}%). Real volatility OR data corrupted. Check quality.")
             data['_has_return_outliers'] = True
 
+      # Add context for Power sector stocks
+      if ticker in ['CEG', 'VST'] and data.get('_has_return_outliers'):
+          warnings.append(f"{ticker}: Power sector has binary catalysts (PPA wins, restarts, regulation). >20% moves normal for role.")
+
         # --- Price cross-check: quote vs last historical close ---
         last_close = float(hist['Close'].iloc[-1])
         if last_close > 0:
@@ -127,8 +131,11 @@ def validate_input_data(portfolio_data):
         if dcf and dcf > 0:
             dcf_ratio = dcf / price
             if dcf_ratio < ANCHOR_MIN_RATIO or dcf_ratio > ANCHOR_MAX_RATIO:
-                warnings.append(f"{ticker}: Model ${dcf:.0f} vs market ${price:.0f}. Model broken OR stock overvalued. Using analyst targets.")
-                data['_dcf_suspect'] = True
+          warnings.append(f"{ticker}: Model ${dcf:.0f} vs market ${price:.0f}. Model broken OR stock overvalued. Using analyst targets.")
+          data['_dcf_suspect'] = True
+          # Add context note once
+          if not any("Growth stocks" in w for w in warnings):
+            warnings.append("Growth stocks often show DCF warnings (AI premium vs traditional model). System uses analyst targets instead.")
 
         # Mark as valid
         data['_skip'] = False
