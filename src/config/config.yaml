@@ -10,7 +10,7 @@
 # PORTFOLIO
 # ----------------------------------------------------------------------------
 
-## Note: To do next: Move Anthropic sonnet model defintion from being hardcoded across files to the YAML file.
+## Note: To do next: Move Anthropic sonnet model defintion from being hardcoded across files to the YAML file. Models change and get upgraded every time.
 
 portfolio:
   # Stocks to analyze (order determines dashboard display)
