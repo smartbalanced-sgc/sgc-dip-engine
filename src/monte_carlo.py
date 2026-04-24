@@ -246,21 +246,41 @@ def run_monte_carlo_stock(
 
 def extract_statistics(paths, current_price):
     """
-    Dip target = 60th percentile of path minimums.
-    Confidence = fraction of paths hitting that level (~60%, informational).
+    Extract primary and fallback dip targets from MC paths.
+    
+    Primary: 60th percentile (current behavior) — deeper dip, moderate conviction
+    Fallback: 80th percentile — shallower dip, higher conviction
     """
-
+    from config import PERCENTILE_TARGET
+    from config_loader import get_config
+    
     minimums = paths.min(axis=1)
+    min_dates = np.argmin(paths, axis=1)
+    
+    # Primary target (60th percentile)
     percentile_low = np.percentile(minimums, PERCENTILE_TARGET)
     confidence = float(np.mean(minimums <= percentile_low))
-
-    min_dates = np.argmin(paths, axis=1)
     median_date_index = int(np.median(min_dates))
-
+    
+    # Fallback target (80th percentile)
+    fallback_pct = get_config('signal', 'fallback_percentile', default=80)
+    fallback_low = np.percentile(minimums, fallback_pct)
+    fallback_confidence = float(np.mean(minimums <= fallback_low))
+    
+    # Fallback timing: median day when paths hit fallback price
+    # Find first day each path drops below fallback
+    fallback_hits = np.argmax(paths <= fallback_low, axis=1)
+    # Filter out paths that never hit fallback (value=0 from argmax of all False)
+    valid_hits = fallback_hits[fallback_hits > 0]
+    fallback_date_index = int(np.median(valid_hits)) if len(valid_hits) > 0 else median_date_index
+    
     return {
         'percentile_low': percentile_low,
         'confidence': confidence,
-        'median_date_index': median_date_index
+        'median_date_index': median_date_index,
+        'fallback_low': fallback_low,
+        'fallback_confidence': fallback_confidence,
+        'fallback_date_index': fallback_date_index
     }
 
 
