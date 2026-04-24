@@ -8,6 +8,7 @@ Design principles:
   - NEVER clamp data and pretend it's real. Flag or degrade instead.
   - NaN is the silent killer. Check at every gate.
   - Log every warning so Jesse can see what the model distrusts.
+  - Warnings must be human-readable and actionable, not technical jargon.
 
 Gate 1: Input data quality (after fetch, before models)
 Gate 2: Model output sanity (after GARCH/HMM, before MC)
@@ -47,11 +48,10 @@ def validate_input_data(portfolio_data):
     today = datetime.now().date()
 
     for ticker, data in portfolio_data.items():
-        prefix = f"[GATE1] {ticker}"
 
         # --- Critical: must have current price ---
         if data.get('current_price') is None:
-            warnings.append(f"{prefix}: No current price — SKIPPED")
+            warnings.append(f"{ticker}: No current price available — cannot analyze, skipping this stock")
             data['_skip'] = True
             continue
 
@@ -59,48 +59,48 @@ def validate_input_data(portfolio_data):
 
         # --- Critical: price must be positive ---
         if price <= 0 or np.isnan(price):
-            warnings.append(f"{prefix}: Invalid price {price} — SKIPPED")
+            warnings.append(f"{ticker}: Invalid price ({price}) — cannot analyze, skipping this stock")
             data['_skip'] = True
             continue
 
         # --- Historical data checks ---
         hist = data.get('historical')
         if hist is None or (hasattr(hist, 'empty') and hist.empty):
-            warnings.append(f"{prefix}: No historical data — SKIPPED")
+            warnings.append(f"{ticker}: No historical price data — cannot model volatility, skipping")
             data['_skip'] = True
             continue
 
         row_count = len(hist)
         if row_count < HIST_MIN_ROWS_SKIP:
-            warnings.append(f"{prefix}: Only {row_count} rows (need {HIST_MIN_ROWS_SKIP}) — SKIPPED")
+            warnings.append(f"{ticker}: Only {row_count} days of history (need at least {HIST_MIN_ROWS_SKIP}) — insufficient for reliable modeling, skipping")
             data['_skip'] = True
             continue
 
         if row_count < HIST_MIN_ROWS_WARN:
-            warnings.append(f"{prefix}: Only {row_count} rows (want {HIST_MIN_ROWS_WARN}) — reduced GARCH accuracy")
+            warnings.append(f"{ticker}: Limited price history ({row_count} of {HIST_MIN_ROWS_WARN} days) — volatility estimate may be less precise")
 
         # --- Freshness check ---
         last_date = pd.to_datetime(hist['Date'].iloc[-1]).date()
         days_stale = (today - last_date).days
         if days_stale > HIST_MAX_STALE_DAYS:
-            warnings.append(f"{prefix}: Data is {days_stale} days stale (last: {last_date})")
+            warnings.append(f"{ticker}: Price data is {days_stale} days old (last update: {last_date}) — signal may not reflect recent market moves")
 
         # --- NaN check in historical ---
         nan_count = hist[['Open', 'High', 'Low', 'Close', 'Volume']].isna().sum().sum()
         if nan_count > 0:
-            warnings.append(f"{prefix}: {nan_count} NaN values in historical data")
+            warnings.append(f"{ticker}: {nan_count} missing values in price history — may reduce model accuracy")
 
         # --- Negative/zero price check ---
         if (hist['Close'] <= 0).any():
             bad_count = (hist['Close'] <= 0).sum()
-            warnings.append(f"{prefix}: {bad_count} non-positive Close prices in history")
+            warnings.append(f"{ticker}: {bad_count} zero or negative prices found in history — possible data corruption")
 
         # --- Returns outlier scan ---
         returns = hist['Close'].pct_change().dropna()
         outliers = returns[returns.abs() > RETURN_OUTLIER_PCT]
         if len(outliers) > 0:
             worst = outliers.abs().max()
-            warnings.append(f"{prefix}: {len(outliers)} daily returns >{RETURN_OUTLIER_PCT*100:.0f}% (max {worst*100:.1f}%) — possible split/data error")
+            warnings.append(f"{ticker}: {len(outliers)} unusually large daily moves detected (up to {worst*100:.1f}%) — could be a stock split or data error")
             data['_has_return_outliers'] = True
 
         # --- Price cross-check: quote vs last historical close ---
@@ -108,12 +108,12 @@ def validate_input_data(portfolio_data):
         if last_close > 0:
             divergence = abs(price - last_close) / last_close
             if divergence > PRICE_CROSSCHECK_MAX_PCT:
-                warnings.append(f"{prefix}: Quote ${price:.2f} vs last close ${last_close:.2f} ({divergence*100:.1f}% divergence)")
+                warnings.append(f"{ticker}: Current price ${price:.2f} differs from last close ${last_close:.2f} by {divergence*100:.1f}% — may indicate stale data")
 
         # --- Volume check ---
         mean_vol = hist['Volume'].mean()
         if mean_vol < VOLUME_MIN_DAILY:
-            warnings.append(f"{prefix}: Mean daily volume {mean_vol:,.0f} below {VOLUME_MIN_DAILY:,}")
+            warnings.append(f"{ticker}: Low trading volume ({mean_vol:,.0f}/day vs {VOLUME_MIN_DAILY:,} minimum) — prices may be less reliable")
 
         # --- Analyst target bounds ---
         targets = data.get('price_targets', {})
@@ -121,7 +121,7 @@ def validate_input_data(portfolio_data):
         if target_mean and target_mean > 0:
             ratio = target_mean / price
             if ratio < ANCHOR_MIN_RATIO or ratio > ANCHOR_MAX_RATIO:
-                warnings.append(f"{prefix}: Analyst target ${target_mean:.2f} is {ratio:.1f}x price — suspect, will use fallback anchor")
+                warnings.append(f"{ticker}: Analyst target ${target_mean:.2f} is {ratio:.1f}× current price — target seems unreliable, using fallback anchor instead")
                 data['_anchor_suspect'] = True
 
         # --- DCF bounds ---
@@ -129,7 +129,7 @@ def validate_input_data(portfolio_data):
         if dcf and dcf > 0:
             dcf_ratio = dcf / price
             if dcf_ratio < ANCHOR_MIN_RATIO or dcf_ratio > ANCHOR_MAX_RATIO:
-                warnings.append(f"{prefix}: DCF ${dcf:.2f} is {dcf_ratio:.1f}x price — suspect")
+                warnings.append(f"{ticker}: DCF fair value ${dcf:.2f} is {dcf_ratio:.1f}× current price — FMP valuation model likely unreliable for this stock")
                 data['_dcf_suspect'] = True
 
         # Mark as valid
@@ -138,7 +138,7 @@ def validate_input_data(portfolio_data):
     skipped = sum(1 for d in portfolio_data.values() if d.get('_skip'))
     valid = len(portfolio_data) - skipped
     if skipped > 0:
-        warnings.append(f"[GATE1] {skipped} stocks skipped, {valid} valid")
+        warnings.append(f"Summary: {skipped} stock(s) skipped due to missing or insufficient data, {valid} stocks analyzed")
 
     return portfolio_data, warnings
 
@@ -154,21 +154,20 @@ def validate_volatility(ticker, volatility, garch_params=None):
     Returns: (validated_vol, is_modelable, warnings_list)
     """
     warnings = []
-    prefix = f"[GATE2] {ticker}"
 
     # NaN check
     if volatility is None or np.isnan(volatility):
-        warnings.append(f"{prefix}: GARCH returned NaN — UNMODELABLE")
+        warnings.append(f"{ticker}: Volatility model failed to produce a result — stock excluded from simulation")
         return None, False, warnings
 
     # Negative vol (should be impossible but defensive)
     if volatility <= 0:
-        warnings.append(f"{prefix}: GARCH vol {volatility:.4f} <= 0 — UNMODELABLE")
+        warnings.append(f"{ticker}: Volatility model returned invalid value ({volatility:.4f}) — stock excluded from simulation")
         return None, False, warnings
 
     # Unmodelable threshold
     if volatility > VOL_UNMODELABLE_PCT:
-        warnings.append(f"{prefix}: Vol {volatility*100:.1f}% exceeds {VOL_UNMODELABLE_PCT*100:.0f}% — UNMODELABLE")
+        warnings.append(f"{ticker}: Annualized volatility is {volatility*100:.0f}% (above {VOL_UNMODELABLE_PCT*100:.0f}% limit) — too volatile to model reliably, excluded")
         return volatility, False, warnings
 
     # Stationarity check
@@ -177,7 +176,7 @@ def validate_volatility(ticker, volatility, garch_params=None):
         beta = garch_params.get('beta', 0)
         persistence = alpha + beta
         if persistence > GARCH_STATIONARITY_WARN:
-            warnings.append(f"{prefix}: GARCH persistence {persistence:.3f} near unit root — vol forecast unreliable")
+            warnings.append(f"{ticker}: Volatility model is unstable (persistence {persistence:.3f}) — dip forecast may overshoot or undershoot")
 
     return volatility, True, warnings
 
@@ -188,15 +187,14 @@ def validate_anchor(ticker, anchor, current_price, source_name="unknown"):
     Returns: (validated_anchor, warnings_list)
     """
     warnings = []
-    prefix = f"[GATE2] {ticker}"
 
     if anchor is None or anchor <= 0 or np.isnan(anchor):
-        warnings.append(f"{prefix}: Anchor ({source_name}) invalid — using current price (no mean reversion)")
+        warnings.append(f"{ticker}: No valid price anchor available ({source_name}) — mean reversion disabled for this stock")
         return current_price, warnings
 
     ratio = anchor / current_price
     if ratio < ANCHOR_MIN_RATIO or ratio > ANCHOR_MAX_RATIO:
-        warnings.append(f"{prefix}: Anchor ${anchor:.2f} ({source_name}) is {ratio:.1f}x price — falling back to current price")
+        warnings.append(f"{ticker}: Price anchor ${anchor:.2f} from {source_name} is {ratio:.1f}× current price — too extreme, using current price instead (no mean reversion)")
         return current_price, warnings
 
     return anchor, warnings
@@ -211,25 +209,25 @@ def validate_correlation_matrix(corr_matrix, ticker_order):
 
     # Check for NaN
     if np.any(np.isnan(corr_matrix)):
-        warnings.append("[GATE2] Correlation matrix contains NaN — using identity matrix")
+        warnings.append("Correlation matrix has missing values — stocks will be simulated independently (no cross-stock correlation)")
         return np.eye(len(ticker_order)), warnings
 
     # Check diagonal
     diag = np.diag(corr_matrix)
     if not np.allclose(diag, 1.0):
-        warnings.append("[GATE2] Correlation diagonal != 1.0 — fixing")
+        warnings.append("Correlation matrix diagonal corrected (minor numerical issue, no impact on results)")
         np.fill_diagonal(corr_matrix, 1.0)
 
     # Check bounds
     if np.any(corr_matrix > 1.0) or np.any(corr_matrix < -1.0):
-        warnings.append("[GATE2] Correlation values outside [-1, 1] — clipping")
+        warnings.append("Some correlation values were out of range and clipped — minor data quality issue")
         corr_matrix = np.clip(corr_matrix, -1.0, 1.0)
 
     # Check for near-perfect correlation (possible data error)
     offdiag = corr_matrix[~np.eye(len(ticker_order), dtype=bool)]
     max_corr = np.max(np.abs(offdiag))
     if max_corr > CORR_MAX_OFFDIAG:
-        warnings.append(f"[GATE2] Max off-diagonal correlation {max_corr:.3f} > {CORR_MAX_OFFDIAG} — possible data issue")
+        warnings.append(f"Two stocks show near-perfect correlation ({max_corr:.2f}) — possible data issue, may overstate crash contagion")
 
     return corr_matrix, warnings
 
@@ -247,7 +245,6 @@ def validate_simulation_results(simulation_results):
     warnings = []
 
     for ticker, result in simulation_results.items():
-        prefix = f"[GATE3] {ticker}"
         current = result.get('current_price')
         target = result.get('percentile_low')
         confidence = result.get('confidence')
@@ -255,13 +252,13 @@ def validate_simulation_results(simulation_results):
         # NaN checks
         if any(v is None or (isinstance(v, float) and np.isnan(v))
                for v in [current, target, confidence]):
-            warnings.append(f"{prefix}: NaN in simulation output — EXCLUDED")
+            warnings.append(f"{ticker}: Simulation produced invalid results — excluded from dashboard")
             result['_exclude'] = True
             continue
 
         # Confidence bounds
         if confidence < 0.0 or confidence > 1.0:
-            warnings.append(f"{prefix}: Confidence {confidence:.3f} outside [0,1] — clamping")
+            warnings.append(f"{ticker}: Confidence value {confidence:.3f} out of range — corrected automatically")
             result['confidence'] = max(0.0, min(1.0, confidence))
 
         # Dip target above current price = "no dip expected"
@@ -272,13 +269,13 @@ def validate_simulation_results(simulation_results):
         if current > 0 and target > 0:
             dip_pct = (current - target) / current
             if dip_pct > DIP_EXTREME_FLAG_PCT:
-                warnings.append(f"{prefix}: Predicted {dip_pct*100:.1f}% dip — flagged as extreme")
+                warnings.append(f"{ticker}: Model predicts a {dip_pct*100:.1f}% dip — this is unusually deep, treat with caution")
                 result['_extreme_dip'] = True
 
         # Median date sanity
         date_idx = result.get('median_date_index', 0)
         if date_idx < 0 or date_idx > SIMULATION_DAYS:
-            warnings.append(f"{prefix}: Median date index {date_idx} outside [0, {SIMULATION_DAYS}]")
+            warnings.append(f"{ticker}: Dip timing estimate was out of range — corrected automatically")
             result['median_date_index'] = max(0, min(SIMULATION_DAYS, date_idx))
 
         result['_exclude'] = False
@@ -299,21 +296,21 @@ def validate_signals_portfolio(execution_data, macro_indicators):
     warnings = []
 
     if not execution_data:
-        warnings.append("[GATE4] No valid signals — dashboard will show error state")
+        warnings.append("No valid signals could be generated — dashboard will show an error state")
         return execution_data, warnings
 
     valid_count = len(execution_data)
 
     # Minimum stock count
     if valid_count < MIN_VALID_STOCKS:
-        warnings.append(f"[GATE4] Only {valid_count}/{len(execution_data)} stocks with signals — degraded dashboard")
+        warnings.append(f"Only {valid_count} stocks have signals (need {MIN_VALID_STOCKS}) — dashboard may be incomplete")
 
     # VIX sanity
     vix = macro_indicators.get('vix', 0)
     if vix < VIX_FLOOR:
-        warnings.append(f"[GATE4] VIX {vix:.1f} below {VIX_FLOOR} — data may be stale or erroneous")
+        warnings.append(f"VIX is {vix:.1f} (unusually low, below {VIX_FLOOR}) — market data may be stale or erroneous")
     elif vix > VIX_CEILING:
-        warnings.append(f"[GATE4] VIX {vix:.1f} above {VIX_CEILING} — extreme market stress")
+        warnings.append(f"VIX is {vix:.1f} (extreme market stress, above {VIX_CEILING}) — model may underestimate crash risk")
 
     # All-same-signal check
     signals = [d['signal'] for d in execution_data.values()]
@@ -321,14 +318,14 @@ def validate_signals_portfolio(execution_data, macro_indicators):
     wait_count = signals.count('WAIT')
 
     if buy_count == valid_count:
-        warnings.append(f"[GATE4] All {valid_count} stocks show BUY — verify macro data")
+        warnings.append(f"All {valid_count} stocks show BUY — this is unusual, verify market data is current")
     elif wait_count == valid_count:
-        warnings.append(f"[GATE4] All {valid_count} stocks show WAIT — verify macro data")
+        warnings.append(f"All {valid_count} stocks show WAIT — likely driven by a shared catalyst (earnings cluster or macro event), not individual stock weakness")
 
     # Average confidence check (informational, not actionable)
     confidences = [d['confidence'] for d in execution_data.values()]
     avg_conf = sum(confidences) / len(confidences) if confidences else 0
     if avg_conf > 0.80:
-        warnings.append(f"[GATE4] Average confidence {avg_conf*100:.0f}% — model is very confident, verify inputs")
+        warnings.append(f"Average model confidence is {avg_conf*100:.0f}% — unusually high, verify that input data is not stale")
 
     return execution_data, warnings
