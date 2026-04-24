@@ -49,3 +49,4 @@ data/*.json
 test_output/
 *.tmp
 src/__pycache__/
+src/__pycache__/

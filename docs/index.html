@@ -36,13 +36,37 @@
             background: #2a1a0a; border: 1px solid #ff9800; border-radius: 12px;
             padding: 15px 20px; margin-bottom: 20px;
         }
-        .warnings h3 { color: #ff9800; margin-bottom: 10px; font-size: 1em; }
-        .warnings ul { list-style: none; padding: 0; }
+        .warnings details summary {
+            color: #ff9800; font-weight: 600; font-size: 1em;
+            cursor: pointer; list-style: none; padding: 2px 0;
+        }
+        .warnings details summary::-webkit-details-marker { display: none; }
+        .warnings details summary::before {
+            content: '▶ '; font-size: 0.8em;
+        }
+        .warnings details[open] summary::before {
+            content: '▼ ';
+        }
+        .warnings ul { list-style: none; padding: 10px 0 0 0; }
         .warnings li {
             color: #ffb74d; font-size: 0.85em; padding: 3px 0;
             border-bottom: 1px solid #3a2a1a;
         }
         .warnings li:last-child { border-bottom: none; }
+
+        .backtest {
+            background: #1a2535; border: 1px solid #4a9eff; border-radius: 12px;
+            padding: 15px 20px; margin-bottom: 20px;
+        }
+        .backtest h3 { color: #4a9eff; margin-bottom: 12px; font-size: 1em; }
+        .backtest-stats { display: flex; gap: 30px; margin-bottom: 10px; }
+        .bt-stat { text-align: center; }
+        .bt-value { display: block; font-size: 1.5em; font-weight: 700; color: #e8eaed; }
+        .bt-label { display: block; font-size: 0.8em; color: #a0a5b0; }
+        .bt-calibration { font-size: 0.9em; color: #a0a5b0; font-style: italic; }
+        .cal-good { color: #66bb6a; }
+        .cal-warn { color: #ffa726; }
+        .backtest-pending { color: #a0a5b0; font-size: 0.9em; }
 
         .deployment {
             background: #1a1f35; padding: 20px; border-radius: 12px;
@@ -97,6 +121,7 @@
 
         @media (max-width: 768px) {
             .deployment-row { flex-direction: column; gap: 10px; }
+            .backtest-stats { flex-direction: column; gap: 10px; }
         }
     </style>
 </head>
@@ -105,11 +130,11 @@
         <div class="header">
             <h1>SGC DIP ENGINE</h1>
             <div class="meta">
-                Last Run: Apr 23, 2026 06:15 PM BST
-                <span class="regime">Market: NEUTRAL (VIX 19.4)</span>
+                Last Run: Apr 24, 2026 12:08 AM BST
+                <span class="regime">Market: NEUTRAL (VIX 19.3)</span>
             </div>
             <div class="meta" style="margin-top: 8px;">
-                Window: 60 days remaining (ends Jun 22, 2026)
+                Window: 60 days remaining (ends Jun 23, 2026)
             </div>
             <div style="margin-top: 12px;">
                 <a href="https://github.com/smartbalanced-sgc/sgc-dip-engine/actions" target="_blank" class="run-btn">▶ Run Now</a>
@@ -118,29 +143,33 @@
 
         
         <div class="warnings">
-            <h3>⚠️ DATA QUALITY WARNINGS (10)</h3>
-            <ul><li>[GATE1] GOOGL: DCF $153.65 is 0.5x price — suspect</li>
+            <details>
+                <summary>⚠️ DATA QUALITY WARNINGS (10) — click to expand</summary>
+                <ul><li>[GATE1] GOOGL: DCF $153.65 is 0.5x price — suspect</li>
 <li>[GATE1] META: DCF $277.23 is 0.4x price — suspect</li>
 <li>[GATE1] ASML: DCF $367.02 is 0.3x price — suspect</li>
 <li>[GATE1] AVGO: 1 daily returns >20% (max 24.4%) — possible split/data error</li>
 <li>[GATE1] VST: 1 daily returns >20% (max 28.3%) — possible split/data error</li>
 <li>[GATE1] VST: DCF $15.60 is 0.1x price — suspect</li>
 <li>[GATE1] CEG: 3 daily returns >20% (max 25.2%) — possible split/data error</li>
-<li>[GATE1] LDO.MI: No current price — SKIPPED</li>
-<li>[GATE1] 1 stocks skipped, 13 valid</li>
-<li>[GATE4] All 13 stocks show WAIT — verify macro data</li></ul>
+<li>[GATE1] LDO.MI: Data is 17 days stale (last: 2026-04-07)</li>
+<li>[GATE1] LDO.MI: Mean daily volume 0 below 100,000</li>
+<li>[GATE4] All 14 stocks show WAIT — verify macro data</li></ul>
+            </details>
         </div>
         
 
+        
+
         <div class="deployment">
-            <h2>TODAY'S DEPLOYMENT (Apr 23)</h2>
+            <h2>TODAY'S DEPLOYMENT (Apr 24)</h2>
             <div class="deployment-row">
                 <strong>BUY TODAY (0):</strong>
                 <span class="buy-list">None</span>
             </div>
             <div class="deployment-row">
-                <strong>WAIT FOR DIP (13):</strong>
-                <span class="wait-list">NVDA, MSFT, GOOGL, META, AMZN, MA, WM, MU, ASML, AVGO, CTAS, VST, CEG</span>
+                <strong>WAIT FOR DIP (14):</strong>
+                <span class="wait-list">NVDA, MSFT, GOOGL, META, AMZN, MA, WM, MU, ASML, AVGO, CTAS, VST, CEG, LDO.MI</span>
             </div>
         </div>
 
@@ -155,22 +184,6 @@
             <tbody>
                 
         <tr>
-            <td class="ticker">MU </td>
-            <td>
-                <div class="signal-row">
-                    <span class="signal-icon">⏳</span>
-                    <span class="signal-text">WAIT</span>
-                    <span class="rsi ">RSI 66</span>
-                </div>
-                <div class="price-row">$479.66 (today)</div>
-                <div class="target-row">⬇️ $403.39 · May 21-27 (15.9%)</div>
-                <div class="confidence-row">Conviction: 60%</div>
-                <div class="oneliner">Deep 15.9% dip expected (60% conviction). Hold firm. Wait.</div>
-            </td>
-            <td class="earnings">2026-06-24 ⚡</td>
-        </tr>
-        
-        <tr>
             <td class="ticker">META </td>
             <td>
                 <div class="signal-row">
@@ -178,28 +191,44 @@
                     <span class="signal-text">WAIT</span>
                     <span class="rsi ">RSI 58</span>
                 </div>
-                <div class="price-row">$658.78 (today)</div>
-                <div class="target-row">⬇️ $558.26 · May 19-25 (15.3%)</div>
+                <div class="price-row">$659.15 (today)</div>
+                <div class="target-row">⬇️ $486.42 · likely around Interest Rate Decision (May 25) (26.2%)</div>
                 <div class="confidence-row">Conviction: 60%</div>
-                <div class="oneliner">Deep 15.3% dip expected (60% conviction). Hold firm. Wait.</div>
+                <div class="oneliner">Deep 26.2% dip expected (60% conviction). Hold firm. Wait.</div>
             </td>
             <td class="earnings">2026-04-29 ⚡</td>
         </tr>
         
         <tr>
-            <td class="ticker">AVGO </td>
+            <td class="ticker">MU </td>
             <td>
                 <div class="signal-row">
                     <span class="signal-icon">⏳</span>
                     <span class="signal-text">WAIT</span>
-                    <span class="rsi rsi-high">RSI 79</span>
+                    <span class="rsi ">RSI 66</span>
                 </div>
-                <div class="price-row">$422.18 (today)</div>
-                <div class="target-row">⬇️ $373.14 · May 23-29 (11.6%)</div>
+                <div class="price-row">$481.72 (today)</div>
+                <div class="target-row">⬇️ $356.48 · likely around Interest Rate Decision (May 26) (26.0%)</div>
                 <div class="confidence-row">Conviction: 60%</div>
-                <div class="oneliner">Deep 11.6% dip expected (60% conviction). Hold firm. Wait.</div>
+                <div class="oneliner">Deep 26.0% dip expected (60% conviction). Hold firm. Wait.</div>
             </td>
-            <td class="earnings">2026-06-03 ⚡</td>
+            <td class="earnings">2026-06-24 ⚡</td>
+        </tr>
+        
+        <tr>
+            <td class="ticker">LDO.MI </td>
+            <td>
+                <div class="signal-row">
+                    <span class="signal-icon">⏳</span>
+                    <span class="signal-text">WAIT</span>
+                    <span class="rsi ">RSI 41</span>
+                </div>
+                <div class="price-row">$57.78 (today)</div>
+                <div class="target-row">⬇️ $45.91 · likely around Interest Rate Decision (May 26) (20.6%)</div>
+                <div class="confidence-row">Conviction: 60%</div>
+                <div class="oneliner">Deep 20.6% dip expected (60% conviction). Hold firm. Wait.</div>
+            </td>
+            <td class="earnings">2026-06-30 ⚡</td>
         </tr>
         
         <tr>
@@ -208,12 +237,12 @@
                 <div class="signal-row">
                     <span class="signal-icon">⏳</span>
                     <span class="signal-text">WAIT</span>
-                    <span class="rsi ">RSI 59</span>
+                    <span class="rsi ">RSI 60</span>
                 </div>
-                <div class="price-row">$415.14 (today)</div>
-                <div class="target-row">⬇️ $366.98 · May 20-26 (11.6%)</div>
+                <div class="price-row">$415.75 (today)</div>
+                <div class="target-row">⬇️ $334.92 · likely around Interest Rate Decision (May 22) (19.4%)</div>
                 <div class="confidence-row">Conviction: 60%</div>
-                <div class="oneliner">Deep 11.6% dip expected (60% conviction). Hold firm. Wait.</div>
+                <div class="oneliner">Deep 19.4% dip expected (60% conviction). Hold firm. Wait.</div>
             </td>
             <td class="earnings">2026-04-29 ⚡</td>
         </tr>
@@ -224,14 +253,30 @@
                 <div class="signal-row">
                     <span class="signal-icon">⏳</span>
                     <span class="signal-text">WAIT</span>
-                    <span class="rsi ">RSI 50</span>
+                    <span class="rsi ">RSI 51</span>
                 </div>
-                <div class="price-row">$291.47 (today)</div>
-                <div class="target-row">⬇️ $259.63 · May 18-24 (10.9%)</div>
+                <div class="price-row">$292.77 (today)</div>
+                <div class="target-row">⬇️ $236.20 · likely around Interest Rate Decision (May 22) (19.3%)</div>
                 <div class="confidence-row">Conviction: 60%</div>
-                <div class="oneliner">Deep 10.9% dip expected (60% conviction). Hold firm. Wait.</div>
+                <div class="oneliner">Deep 19.3% dip expected (60% conviction). Hold firm. Wait.</div>
             </td>
             <td class="earnings">2026-05-11 ⚡</td>
+        </tr>
+        
+        <tr>
+            <td class="ticker">AVGO </td>
+            <td>
+                <div class="signal-row">
+                    <span class="signal-icon">⏳</span>
+                    <span class="signal-text">WAIT</span>
+                    <span class="rsi rsi-high">RSI 77</span>
+                </div>
+                <div class="price-row">$419.94 (today)</div>
+                <div class="target-row">⬇️ $339.31 · likely around Dallas Fed Services Index (May) (May 27) (19.2%)</div>
+                <div class="confidence-row">Conviction: 60%</div>
+                <div class="oneliner">Deep 19.2% dip expected (60% conviction). Hold firm. Wait.</div>
+            </td>
+            <td class="earnings">2026-06-03 ⚡</td>
         </tr>
         
         <tr>
@@ -240,12 +285,12 @@
                 <div class="signal-row">
                     <span class="signal-icon">⏳</span>
                     <span class="signal-text">WAIT</span>
-                    <span class="rsi ">RSI 48</span>
+                    <span class="rsi ">RSI 49</span>
                 </div>
-                <div class="price-row">$156.29 (today)</div>
-                <div class="target-row">⬇️ $139.45 · May 18-24 (10.8%)</div>
+                <div class="price-row">$156.85 (today)</div>
+                <div class="target-row">⬇️ $127.65 · likely around Interest Rate Decision (May 22) (18.6%)</div>
                 <div class="confidence-row">Conviction: 60%</div>
-                <div class="oneliner">Deep 10.8% dip expected (60% conviction). Hold firm. Wait.</div>
+                <div class="oneliner">Deep 18.6% dip expected (60% conviction). Hold firm. Wait.</div>
             </td>
             <td class="earnings">2026-05-07 ⚡</td>
         </tr>
@@ -256,12 +301,12 @@
                 <div class="signal-row">
                     <span class="signal-icon">⏳</span>
                     <span class="signal-text">WAIT</span>
-                    <span class="rsi ">RSI 67</span>
+                    <span class="rsi ">RSI 66</span>
                 </div>
-                <div class="price-row">$339.95 (today)</div>
-                <div class="target-row">⬇️ $304.66 · May 20-26 (10.4%)</div>
+                <div class="price-row">$338.89 (today)</div>
+                <div class="target-row">⬇️ $278.17 · likely around Interest Rate Decision (May 25) (17.9%)</div>
                 <div class="confidence-row">Conviction: 60%</div>
-                <div class="oneliner">Deep 10.4% dip expected (60% conviction). Hold firm. Wait.</div>
+                <div class="oneliner">Deep 17.9% dip expected (60% conviction). Hold firm. Wait.</div>
             </td>
             <td class="earnings">2026-04-29 ⚡</td>
         </tr>
@@ -272,12 +317,12 @@
                 <div class="signal-row">
                     <span class="signal-icon">⏳</span>
                     <span class="signal-text">WAIT</span>
-                    <span class="rsi ">RSI 50</span>
+                    <span class="rsi ">RSI 51</span>
                 </div>
-                <div class="price-row">$1413.76 (today)</div>
-                <div class="target-row">⬇️ $1267.00 · May 19-25 (10.4%)</div>
+                <div class="price-row">$1417.80 (today)</div>
+                <div class="target-row">⬇️ $1167.18 · likely around Interest Rate Decision (May 22) (17.7%)</div>
                 <div class="confidence-row">Conviction: 60%</div>
-                <div class="oneliner">Deep 10.4% dip expected (60% conviction). Hold firm. Wait.</div>
+                <div class="oneliner">Deep 17.7% dip expected (60% conviction). Hold firm. Wait.</div>
             </td>
             <td class="earnings">2026-07-15 ⚡</td>
         </tr>
@@ -290,10 +335,10 @@
                     <span class="signal-text">WAIT</span>
                     <span class="rsi rsi-high">RSI 76</span>
                 </div>
-                <div class="price-row">$255.19 (today)</div>
-                <div class="target-row">⬇️ $229.13 · May 20-26 (10.2%)</div>
+                <div class="price-row">$255.08 (today)</div>
+                <div class="target-row">⬇️ $211.10 · likely around Interest Rate Decision (May 22) (17.2%)</div>
                 <div class="confidence-row">Conviction: 60%</div>
-                <div class="oneliner">Deep 10.2% dip expected (60% conviction). Hold firm. Wait.</div>
+                <div class="oneliner">Deep 17.2% dip expected (60% conviction). Hold firm. Wait.</div>
             </td>
             <td class="earnings">2026-04-29 ⚡</td>
         </tr>
@@ -304,12 +349,12 @@
                 <div class="signal-row">
                     <span class="signal-icon">⏳</span>
                     <span class="signal-text">WAIT</span>
-                    <span class="rsi ">RSI 64</span>
+                    <span class="rsi ">RSI 65</span>
                 </div>
-                <div class="price-row">$199.14 (today)</div>
-                <div class="target-row">⬇️ $181.05 · May 19-25 (9.1%)</div>
+                <div class="price-row">$199.64 (today)</div>
+                <div class="target-row">⬇️ $167.99 · likely around earnings (May 20) (15.9%)</div>
                 <div class="confidence-row">Conviction: 60%</div>
-                <div class="oneliner">Strong 9.1% dip expected (60% conviction). Be patient.</div>
+                <div class="oneliner">Deep 15.9% dip expected (60% conviction). Hold firm. Wait.</div>
             </td>
             <td class="earnings">2026-05-20 ⚡</td>
         </tr>
@@ -320,12 +365,12 @@
                 <div class="signal-row">
                     <span class="signal-icon">⏳</span>
                     <span class="signal-text">WAIT</span>
-                    <span class="rsi ">RSI 45</span>
+                    <span class="rsi ">RSI 46</span>
                 </div>
-                <div class="price-row">$501.38 (today)</div>
-                <div class="target-row">⬇️ $466.42 · May 18-24 (7.0%)</div>
+                <div class="price-row">$502.38 (today)</div>
+                <div class="target-row">⬇️ $440.59 · likely around Interest Rate Decision (May 22) (12.3%)</div>
                 <div class="confidence-row">Conviction: 60%</div>
-                <div class="oneliner">Strong 7.0% dip expected (60% conviction). Be patient.</div>
+                <div class="oneliner">Deep 12.3% dip expected (60% conviction). Hold firm. Wait.</div>
             </td>
             <td class="earnings">2026-04-30 ⚡</td>
         </tr>
@@ -336,12 +381,12 @@
                 <div class="signal-row">
                     <span class="signal-icon">⏳</span>
                     <span class="signal-text">WAIT</span>
-                    <span class="rsi ">RSI 53</span>
+                    <span class="rsi ">RSI 56</span>
                 </div>
-                <div class="price-row">$231.07 (today)</div>
-                <div class="target-row">⬇️ $215.78 · May 19-25 (6.6%)</div>
+                <div class="price-row">$232.80 (today)</div>
+                <div class="target-row">⬇️ $204.45 · likely around Interest Rate Decision (May 22) (12.2%)</div>
                 <div class="confidence-row">Conviction: 60%</div>
-                <div class="oneliner">Strong 6.6% dip expected (60% conviction). Be patient.</div>
+                <div class="oneliner">Deep 12.2% dip expected (60% conviction). Hold firm. Wait.</div>
             </td>
             <td class="earnings">2026-04-28 ⚡</td>
         </tr>
@@ -352,12 +397,12 @@
                 <div class="signal-row">
                     <span class="signal-icon">⏳</span>
                     <span class="signal-text">WAIT</span>
-                    <span class="rsi ">RSI 46</span>
+                    <span class="rsi ">RSI 48</span>
                 </div>
-                <div class="price-row">$176.65 (today)</div>
-                <div class="target-row">⬇️ $168.79 · May 14-20 (4.4%)</div>
+                <div class="price-row">$177.62 (today)</div>
+                <div class="target-row">⬇️ $165.06 · likely around CPI YoY (Apr) (May 19) (7.1%)</div>
                 <div class="confidence-row">Conviction: 60%</div>
-                <div class="oneliner">Moderate 4.4% dip expected (60% conviction). Worth waiting.</div>
+                <div class="oneliner">Strong 7.1% dip expected (60% conviction). Be patient.</div>
             </td>
             <td class="earnings">2026-07-16 ⚡</td>
         </tr>
