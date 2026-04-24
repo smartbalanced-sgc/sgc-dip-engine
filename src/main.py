@@ -1,16 +1,20 @@
 """
-Main Orchestrator — SGC Dip Engine v7
-Pipeline with Phase 2 enrichment:
+Main Orchestrator — SGC Dip Engine v6
+Pipeline with Phase 2 enrichment + Session 2 intelligence:
   Data → GATE 1 → Regimes → GATE 2 → Sentiment → Correlation → MC → GATE 3 → Signals → GATE 4 → Dashboard
 
-Phase 2 change: Sentiment runs BEFORE MC so Claude API scores
-feed into the simulation as drift modifiers.
+Session 2 changes:
+  - macro_events passed to MC for time-varying volatility
+  - portfolio_data + macro_events passed to execution signals for catalyst dates
+  - Backtest runs after archive (if ≥14 days of data)
+  - Backtest results displayed on dashboard
 """
 
 import sys
 from datetime import datetime
 
 from config import PORTFOLIO, MIN_VALID_STOCKS
+from config_loader import get_config
 from data_fetcher import fetch_portfolio_data
 from garch_model import calculate_forward_volatility
 from hmm_regime import detect_regime_simple, get_regime_adjustments
@@ -21,6 +25,7 @@ from sentiment import analyze_stock_sentiment
 from execution_logic import process_execution_signals
 from dashboard_generator import generate_html, save_html
 from signal_archiver import archive_signals
+from backtest import run_backtest
 from validators import (
     validate_input_data,
     validate_volatility,
@@ -40,7 +45,7 @@ def main():
     all_warnings = []
 
     # =========================================================
-    # STEP 1: Fetch all data (15 FMP endpoints + yfinance + macro)
+    # STEP 1: Fetch all data (15 FMP endpoints + Eulerpool/yfinance + macro)
     # =========================================================
     print("\n📊 STEP 1: Fetching portfolio data...")
     portfolio_data, macro_events = fetch_portfolio_data()
@@ -147,10 +152,14 @@ def main():
     print(f"   Correlation matrix: {corr_matrix.shape} ({len(unmodelable)} stocks excluded)")
 
     # =========================================================
-    # STEP 5: Run Monte Carlo simulations (with Phase 2 enrichment)
+    # STEP 5: Run Monte Carlo simulations
+    # §Session 2: macro_events passed for time-varying vol schedule
     # =========================================================
     print("\n🎲 STEP 5: Running Monte Carlo simulations...")
-    simulation_results = simulate_portfolio(modelable_data, corr_matrix, ticker_order, regime_info)
+    simulation_results = simulate_portfolio(
+        modelable_data, corr_matrix, ticker_order, regime_info,
+        macro_events=macro_events  # §Session 2: time-varying vol
+    )
     print(f"   Simulated {len(simulation_results)} stocks")
 
     # ----- GATE 3: Simulation output validation -----
@@ -162,12 +171,19 @@ def main():
 
     # =========================================================
     # STEP 6: Generate execution signals
+    # §Session 2: portfolio_data + macro_events for anchor suppression + catalyst dates
     # =========================================================
     print("\n⚡ STEP 6: Generating execution signals...")
-    execution_data = process_execution_signals(simulation_results)
+    execution_data = process_execution_signals(
+        simulation_results,
+        portfolio_data=portfolio_data,  # §Session 2: anchor suppression
+        macro_events=macro_events       # §Session 2: catalyst dates
+    )
 
     for ticker, data in execution_data.items():
         print(f"   {ticker}: {data['signal']} - {data['one_liner']}")
+        if data.get('_anchor_suppressed'):
+            print(f"      🔇 {data['_suppress_reason']}")
 
     # ----- GATE 4: Portfolio-level signal validation -----
     print("\n🔒 GATE 4: Validating portfolio signals...")
@@ -178,14 +194,25 @@ def main():
 
     # =========================================================
     # STEP 7: Generate dashboard
+    # §Session 2: backtest results passed to dashboard
     # =========================================================
+    # §Session 2: Run backtest if enabled and sufficient data
+    backtest_results = None
+    if get_config('backtest', 'enabled', default=False):
+        print("\n📊 Running backtest...")
+        try:
+            backtest_results = run_backtest()
+        except Exception as e:
+            print(f"   ⚠️  Backtest failed: {e}")
+
     print("\n📈 STEP 7: Generating HTML dashboard...")
     html = generate_html(
         execution_data,
         macro_regime,
         macro_indicators['vix'],
         portfolio_data,
-        warnings=all_warnings
+        warnings=all_warnings,
+        backtest_results=backtest_results  # §Session 2: backtest on dashboard
     )
     save_html(html)
 
@@ -197,7 +224,6 @@ def main():
         archive_signals(execution_data, portfolio_data)
     except Exception as e:
         print(f"   ⚠️  Signal archive failed: {e}")
-        # Continue - archiving is not critical for daily operation
 
     # Summary
     print("\n" + "=" * 60)
@@ -208,6 +234,8 @@ def main():
     print(f"   Unmodelable: {len(unmodelable)} ({', '.join(unmodelable) if unmodelable else 'none'})")
     print(f"   Warnings: {len(all_warnings)}")
     print(f"   BUY: {buy_count} | WAIT: {wait_count}")
+    if backtest_results and backtest_results.get('status') == 'complete':
+        print(f"   Backtest: {backtest_results['hit_rate']:.0%} hit rate ({backtest_results['hits']}/{backtest_results['total_wait_signals']})")
     print("=" * 60)
 
     return 0
