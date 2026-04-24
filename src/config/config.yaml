@@ -1,5 +1,5 @@
 # ============================================================================
-# SGC DIP ENGINE CONFIGURATION
+# SGC DIP ENGINE CONFIGURATION for Portfolio v7 (Session 3 Update)
 # ============================================================================
 # All behavioral parameters for Monte Carlo simulation, signal generation,
 # enrichment modifiers, validation thresholds, and execution schedule.
@@ -9,9 +9,6 @@
 # ----------------------------------------------------------------------------
 # PORTFOLIO
 # ----------------------------------------------------------------------------
-
-## Note: To do next: Move Anthropic sonnet model defintion from being hardcoded across files to the YAML file. Models change and get upgraded every time.
-
 portfolio:
   # Stocks to analyze (order determines dashboard display)
   # US stocks use FMP, LDO.MI uses yfinance with Eulerpool fallback
@@ -50,19 +47,26 @@ portfolio:
     WM: 0.04
 
 # ----------------------------------------------------------------------------
-# SIGNAL LOGIC (The Two Core Parameters)
+# SIGNAL LOGIC (Session 3: Added Fallback Percentile)
 # ----------------------------------------------------------------------------
 signal:
-  # Conviction dial: what percentile of MC paths to use for dip target
-  # 60 = show dip that 60% of paths reach (primary signal)
+  # PRIMARY TARGET: Conviction dial for main dip prediction
+  # 60 = show dip that 60% of paths reach (moderate conviction, deeper dip)
+  # Higher = shallower dips (more certain), Lower = deeper dips (less certain)
+  # Range: 50-80 recommended, 60 is balanced
   percentile_target: 60
   
-  # Fallback percentile for high-conviction alternative
-  # 80 = show dip that 80% of paths reach (higher certainty, shallower dip)
+  # FALLBACK TARGET: High-conviction alternative when primary is WAIT
+  # 80 = show dip that 80% of paths reach (high conviction, shallower dip)
+  # Session 3: Provides second-best option for deployment urgency
+  # Only shown when primary signal is WAIT and fallback dip ≥ materiality threshold
   fallback_percentile: 80
   
   # Materiality threshold: minimum dip worth waiting for
-  # Applies to both primary and fallback signals
+  # If predicted dip < this %, signal BUY (not worth waiting)
+  # 0.03 = 3% threshold
+  # On £500/mo positions, 3% is where savings compound meaningfully
+  # Applies to BOTH primary and fallback signals
   min_actionable_dip_pct: 0.03
 
 # ----------------------------------------------------------------------------
