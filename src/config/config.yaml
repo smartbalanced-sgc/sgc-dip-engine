@@ -176,6 +176,22 @@ data:
   yfinance_tickers:
     - LDO.MI
   
+  # Macro calendar filtering (US events only)
+  # Keywords to match in economic calendar event names
+  macro_calendar_keywords:
+    - "interest rate"
+    - "fomc"
+    - "cpi"
+    - "nonfarm"
+    - "unemployment"
+    - "gdp"
+    - "pce"
+  
+  # Country filter (ISO 2-letter codes)
+  # Only events from these countries trigger vol spikes
+  macro_calendar_countries:
+    - "US"
+
   # Eulerpool fallback for LDO.MI when yfinance fails
   # yfinance gets 429 errors on GitHub Actions shared IPs
   use_eulerpool_fallback: true
