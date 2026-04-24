@@ -2,9 +2,10 @@
 HTML Dashboard Generator — Session 2
 Creates the daily decision table with:
 - Collapsible warning banner (COLLAPSED by default, click to expand)
-- Backtest results section (if data exists)
+- Backtest results section with description
 - Post-earnings anchor suppression flags
 - Catalyst-aware date display
+- Currency-aware price display (€ for .MI tickers, $ for US)
 
 Sort: BUY first (shallowest dip = strongest buy), then WAIT (deepest dip first).
 """
@@ -12,6 +13,15 @@ Sort: BUY first (shallowest dip = strongest buy), then WAIT (deepest dip first).
 from datetime import datetime, timedelta
 import os
 from config import OUTPUT_DIR, OUTPUT_FILE, PERCENTILE_TARGET
+
+
+def get_currency_symbol(ticker):
+    """Return currency symbol based on ticker exchange suffix."""
+    if ticker.endswith('.MI') or ticker.endswith('.PA') or ticker.endswith('.DE'):
+        return '€'
+    elif ticker.endswith('.L'):
+        return '£'
+    return '$'
 
 
 def generate_html(execution_data, macro_regime, vix, portfolio_data,
@@ -44,7 +54,7 @@ def generate_html(execution_data, macro_regime, vix, portfolio_data,
         </div>
         """
 
-    # §Session 2: Backtest results section
+    # §Session 2: Backtest results section with description
     backtest_html = ""
     if backtest_results:
         if backtest_results.get('status') == 'insufficient_data':
@@ -52,8 +62,8 @@ def generate_html(execution_data, macro_regime, vix, portfolio_data,
             days_need = backtest_results.get('days_needed', 14)
             backtest_html = f"""
             <div class="backtest">
-                <h3>📊 Backtest</h3>
-                <p class="backtest-pending">Collecting data: {days_have}/{days_need} days (need {days_need - days_have} more)</p>
+                <h3>📊 Backtest <span class="bt-desc">— Tracks whether past WAIT signals correctly predicted actual dips</span></h3>
+                <p class="backtest-pending">Collecting data: {days_have}/{days_need} days ({backtest_results.get('message', f'need {days_need - days_have} more')})</p>
             </div>
             """
         elif backtest_results.get('status') == 'complete':
@@ -68,14 +78,12 @@ def generate_html(execution_data, macro_regime, vix, portfolio_data,
             cal_class = ''
             if calibration == 'well_calibrated':
                 cal_class = 'cal-good'
-            elif calibration == 'overconfident':
-                cal_class = 'cal-warn'
-            elif calibration == 'underconfident':
+            elif calibration in ('overconfident', 'underconfident'):
                 cal_class = 'cal-warn'
 
             backtest_html = f"""
             <div class="backtest">
-                <h3>📊 Backtest Results</h3>
+                <h3>📊 Backtest <span class="bt-desc">— Tracks whether past WAIT signals correctly predicted actual dips</span></h3>
                 <div class="backtest-stats">
                     <div class="bt-stat">
                         <span class="bt-value">{hit_rate:.0%}</span>
@@ -111,6 +119,7 @@ def generate_html(execution_data, macro_regime, vix, portfolio_data,
         earnings_display = f"{earnings} ⚡" if earnings else "—"
 
         signal_icon = "🟢" if data['signal'] == 'BUY' else "⏳"
+        ccy = get_currency_symbol(ticker)
 
         # Per-stock warning indicator
         stock_warn = ""
@@ -124,13 +133,13 @@ def generate_html(execution_data, macro_regime, vix, portfolio_data,
         dip_pct = data.get('dip_pct', 0)
         dip_display = f"{dip_pct*100:.1f}%"
 
-        # Target display
+        # Target display with correct currency
         if data.get('_no_dip') or data.get('reason_code') == 'no_dip':
             target_display = "No dip expected in window"
         elif data.get('reason_code') == 'immaterial':
-            target_display = f"⬇️ ${data['target_price']:.2f} · {data['date_range']} ({dip_display} — immaterial)"
+            target_display = f"⬇️ {ccy}{data['target_price']:.2f} · {data['date_range']} ({dip_display} — immaterial)"
         else:
-            target_display = f"⬇️ ${data['target_price']:.2f} · {data['date_range']} ({dip_display})"
+            target_display = f"⬇️ {ccy}{data['target_price']:.2f} · {data['date_range']} ({dip_display})"
 
         # RSI badge
         rsi_val = p_data.get('rsi')
@@ -155,7 +164,7 @@ def generate_html(execution_data, macro_regime, vix, portfolio_data,
                     <span class="signal-text">{data['signal']}</span>
                     {rsi_display}
                 </div>
-                <div class="price-row">${data['current_price']:.2f} (today)</div>
+                <div class="price-row">{ccy}{data['current_price']:.2f} (today)</div>
                 <div class="target-row">{target_display}</div>
                 <div class="confidence-row">{conviction_display}</div>
                 <div class="oneliner">{data['one_liner']}</div>
@@ -225,6 +234,7 @@ def generate_html(execution_data, macro_regime, vix, portfolio_data,
             padding: 15px 20px; margin-bottom: 20px;
         }}
         .backtest h3 {{ color: #4a9eff; margin-bottom: 12px; font-size: 1em; }}
+        .bt-desc {{ color: #a0a5b0; font-weight: 400; font-size: 0.85em; }}
         .backtest-stats {{ display: flex; gap: 30px; margin-bottom: 10px; }}
         .bt-stat {{ text-align: center; }}
         .bt-value {{ display: block; font-size: 1.5em; font-weight: 700; color: #e8eaed; }}
