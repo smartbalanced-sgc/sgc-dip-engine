@@ -1,5 +1,5 @@
 """
-SGC Dip Engine v7 — Validation & Guardrail Layer
+SGC Dip Engine v7 — Validation & Guardrail Layer (Session 3 Update)
 
 Four-gate validation pipeline that prevents garbage signals from
 reaching the dashboard. Each gate validates at a pipeline stage.
@@ -14,6 +14,8 @@ Gate 1: Input data quality (after fetch, before models)
 Gate 2: Model output sanity (after GARCH/HMM, before MC)
 Gate 3: Simulation output sanity (after MC, before signals)
 Gate 4: Portfolio-level coherence (after signals, before dashboard)
+
+Session 3: Added caveman context notes for common warnings.
 """
 
 import numpy as np
@@ -41,6 +43,10 @@ def validate_input_data(portfolio_data):
     """
     warnings = []
     today = datetime.now().date()
+    
+    # Track if we need to add context notes
+    has_dcf_warnings = False
+    has_power_sector_outliers = False
 
     for ticker, data in portfolio_data.items():
 
@@ -100,10 +106,10 @@ def validate_input_data(portfolio_data):
             else:
                 warnings.append(f"{ticker}: {len(outliers)} moves over {RETURN_OUTLIER_PCT*100:.0f}% (max {worst*100:.0f}%). Real volatility OR data corrupted. Check quality.")
             data['_has_return_outliers'] = True
-
-      # Add context for Power sector stocks
-      if ticker in ['CEG', 'VST'] and data.get('_has_return_outliers'):
-          warnings.append(f"{ticker}: Power sector has binary catalysts (PPA wins, restarts, regulation). >20% moves normal for role.")
+            
+            # Session 3: Track if Power sector stocks have outliers for context note
+            if ticker in ['CEG', 'VST']:
+                has_power_sector_outliers = True
 
         # --- Price cross-check: quote vs last historical close ---
         last_close = float(hist['Close'].iloc[-1])
@@ -131,14 +137,19 @@ def validate_input_data(portfolio_data):
         if dcf and dcf > 0:
             dcf_ratio = dcf / price
             if dcf_ratio < ANCHOR_MIN_RATIO or dcf_ratio > ANCHOR_MAX_RATIO:
-          warnings.append(f"{ticker}: Model ${dcf:.0f} vs market ${price:.0f}. Model broken OR stock overvalued. Using analyst targets.")
-          data['_dcf_suspect'] = True
-          # Add context note once
-          if not any("Growth stocks" in w for w in warnings):
-            warnings.append("Growth stocks often show DCF warnings (AI premium vs traditional model). System uses analyst targets instead.")
+                warnings.append(f"{ticker}: Model ${dcf:.0f} vs market ${price:.0f}. Model broken OR stock overvalued. Using analyst targets.")
+                data['_dcf_suspect'] = True
+                has_dcf_warnings = True
 
         # Mark as valid
         data['_skip'] = False
+
+    # Session 3: Add context notes at end (once per category)
+    if has_dcf_warnings:
+        warnings.append("NOTE: Growth stocks often show DCF warnings (AI premium vs traditional model). System uses analyst consensus instead.")
+    
+    if has_power_sector_outliers:
+        warnings.append("NOTE: Power sector (CEG, VST) has binary catalysts (PPA wins, restarts, regulation). >20% moves normal for role.")
 
     skipped = sum(1 for d in portfolio_data.values() if d.get('_skip'))
     valid = len(portfolio_data) - skipped
