@@ -267,25 +267,48 @@ def fetch_insider_stats_fmp(ticker):
 # =============================================================
 
 def fetch_economic_calendar():
-    """FMP economic-calendar — Fed/CPI/jobs dates in next 60 days"""
+    """
+    FMP economic-calendar — US macro events in next 60 days.
+    
+    CRITICAL: FMP returns 3000+ global events. Without country filter,
+    101 foreign "interest rate" events (Turkey, Hungary, etc.) each get
+    ×2.0 vol spikes, massively inflating dip predictions for US stocks.
+    
+    Fix: Filter by country='US' first, then match keywords.
+    Keywords and countries configurable via config.yaml.
+    """
+    from config_loader import get_config
+
     today = datetime.now().strftime("%Y-%m-%d")
     future = (datetime.now() + timedelta(days=60)).strftime("%Y-%m-%d")
     url = f"{FMP_BASE_URL}/economic-calendar"
     params = {"from": today, "to": future, "apikey": FMP_API_KEY}
     time.sleep(API_DELAY)
+
+    # Read filter config (keywords + countries) from config.yaml
+    keywords = get_config('data', 'macro_calendar_keywords',
+                          default=['interest rate', 'fomc', 'cpi', 'nonfarm',
+                                   'unemployment', 'gdp', 'pce'])
+    allowed_countries = get_config('data', 'macro_calendar_countries',
+                                   default=['US'])
+
     try:
         resp = requests.get(url, params=params, timeout=API_TIMEOUT)
         if resp.status_code == 200:
             events = resp.json()
-            keywords = ['interest rate', 'fomc', 'fed', 'cpi', 'nonfarm',
-                        'unemployment', 'gdp', 'pce']
             macro_events = []
             for e in events:
+                # §Session 2: Country filter — only US events affect US stock portfolio
+                country = (e.get('country', '') or '').upper()
+                if country not in allowed_countries:
+                    continue
+
                 event_name = (e.get('event', '') or '').lower()
                 if any(kw in event_name for kw in keywords):
                     macro_events.append({
                         'date': e.get('date', ''),
-                        'event': e.get('event', '')
+                        'event': e.get('event', ''),
+                        'country': country
                     })
             return macro_events
         return []
