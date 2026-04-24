@@ -8,7 +8,7 @@ Differentiation comes from how DEEP each stock's dip is at that conviction.
 Decision flow:
   1. Model outputs a dip target per stock (60th percentile of path minimums)
   2. Calculate dip % = (current - target) / current
-  3. If dip < 3% → BUY (dip too small to matter at Jesse's position sizes)
+  3. If dip < 3% → BUY (dip too small to matter at position sizes)
   4. If dip >= 3% → WAIT (meaningful dip worth waiting for)
 
 SESSION 2 ENHANCEMENTS:
@@ -193,6 +193,25 @@ def process_execution_signals(simulation_results, portfolio_data=None, macro_eve
 
         signal, reason_code, dip_pct = generate_signal(current, target)
         one_liner = generate_one_liner(signal, dip_pct, reason_code)
+
+      # Session 3: Generate fallback signal when primary is WAIT
+        fallback = None
+        if signal == 'WAIT':
+            fb_signal, fb_reason, fb_dip = generate_signal(current, result['fallback_low'])
+            
+            # Only show fallback if actionable (BUY or meaningful WAIT)
+            if fb_signal == 'BUY' or fb_dip >= MIN_ACTIONABLE_DIP_PCT:
+                fallback = {
+                    'price': result['fallback_low'],
+                    'dip_pct': fb_dip,
+                    'confidence': result['fallback_confidence'],
+                    'signal': fb_signal,
+                    'date_range': format_date_range(
+                        result['fallback_date_index'],
+                        earnings_date=stock_data.get('earnings_date'),
+                        macro_events=macro_events
+                    )
+                }
 
         # §Session 2: Pass earnings/macro for catalyst-aware date formatting
         earnings_date = stock_data.get('earnings_date')
