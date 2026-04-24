@@ -1,6 +1,6 @@
 """
-Main Orchestrator — SGC Dip Engine v7
-Pipeline with Phase 2 enrichment + Session 2 intelligence:
+Main Orchestrator — SGC Dip Engine v7 (Session 3 Update)
+Pipeline with Phase 2 enrichment + Session 2 intelligence + Session 3 AI upgrade:
   Data → GATE 1 → Regimes → GATE 2 → Sentiment → Correlation → MC → GATE 3 → Signals → GATE 4 → Dashboard
 
 Session 2 changes:
@@ -8,6 +8,11 @@ Session 2 changes:
   - portfolio_data + macro_events passed to execution signals for catalyst dates
   - Backtest runs after archive (if ≥14 days of data)
   - Backtest results displayed on dashboard
+
+Session 3 changes:
+  - Sentiment analysis upgraded with web search enrichment
+  - Company name and sector passed to sentiment analysis
+  - Sentiment cost tracking and display
 """
 
 import sys
@@ -38,7 +43,7 @@ from validators import (
 
 def main():
     print("=" * 60)
-    print("SGC DIP ENGINE v6 - Starting Run")
+    print("SGC DIP ENGINE v7 - Starting Run")
     print(f"Timestamp: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
     print("=" * 60)
 
@@ -119,38 +124,41 @@ def main():
             anchor, anchor_warnings = validate_anchor(ticker, target_mean, price, "analyst_target")
             all_warnings.extend(anchor_warnings)
 
-    # =========================================================  
-    # STEP 3: Analyze sentiment (BEFORE MC — Phase 2)
     # =========================================================
-      print("\n🤖 STEP 3: Analyzing sentiment (Claude API with web search)...")
-      modelable_data = {t: d for t, d in valid_stocks.items() if t not in unmodelable}
-      try:
-          total_sentiment_cost = 0.0
-          for ticker, data in modelable_data.items():
-              # Extract company name and sector from profile
-              profile = data.get('profile', {}) or {}
-              company_name = profile.get('companyName', ticker)
-              sector = profile.get('sector', 'Unknown')
+    # STEP 3: Analyze sentiment (BEFORE MC — Phase 2)
+    # Session 3: Web search enrichment + cost tracking
+    # Scores are attached to portfolio_data so MC can use them.
+    # =========================================================
+    print("\n🤖 STEP 3: Analyzing sentiment (Claude API with web search)...")
+    modelable_data = {t: d for t, d in valid_stocks.items() if t not in unmodelable}
+    try:
+        total_sentiment_cost = 0.0
+        for ticker, data in modelable_data.items():
+            # Session 3: Extract company name and sector from profile
+            profile = data.get('profile', {}) or {}
+            company_name = profile.get('companyName', ticker)
+            sector = profile.get('sector', 'Unknown')
             
-              sentiment = analyze_stock_sentiment(
-                  ticker,
-                  data['current_price'],
-                  data['earnings_date'],
-                  data['analyst_grade'],
-                  company_name=company_name,
-                  sector=sector
-              )
+            sentiment = analyze_stock_sentiment(
+                ticker,
+                data['current_price'],
+                data['earnings_date'],
+                data['analyst_grade'],
+                company_name=company_name,
+                sector=sector
+            )
             
-              # Attach to portfolio_data
-              portfolio_data[ticker]['sentiment'] = sentiment
-              total_sentiment_cost += sentiment.get('cost', 0.0)
+            # Attach to portfolio_data so MC can read it
+            portfolio_data[ticker]['sentiment'] = sentiment
+            total_sentiment_cost += sentiment.get('cost', 0.0)
             
-              print(f"   {ticker}: {sentiment['sentiment_score']:+.1f} - {sentiment['narrative'][:60]}")
+            print(f"   {ticker}: {sentiment['sentiment_score']:+.1f} - {sentiment['narrative'][:60]}")
         
-          print(f"   Total sentiment cost: £{total_sentiment_cost * 0.85:.2f}")  # Rough USD to GBP
+        # Session 3: Display total sentiment cost
+        print(f"   Total sentiment cost: £{total_sentiment_cost * 0.85:.2f}")  # Rough USD to GBP
         
-      except Exception as e:
-          print(f"   ⚠️  Sentiment analysis skipped: {e}")
+    except Exception as e:
+        print(f"   ⚠️  Sentiment analysis skipped: {e}")
 
     # =========================================================
     # STEP 4: Build correlation matrix
