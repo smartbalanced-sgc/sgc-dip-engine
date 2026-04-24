@@ -9,6 +9,9 @@
 # ----------------------------------------------------------------------------
 # PORTFOLIO
 # ----------------------------------------------------------------------------
+
+## Note: To do next: Move Anthropic sonnet model defintion from being hardcoded across files to the YAML file.
+
 portfolio:
   # Stocks to analyze (order determines dashboard display)
   # US stocks use FMP, LDO.MI uses yfinance with Eulerpool fallback
