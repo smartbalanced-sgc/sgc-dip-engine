@@ -1,6 +1,11 @@
 """
-HTML Dashboard Generator
-Creates the daily decision table with guardrail warning banner.
+HTML Dashboard Generator — Session 2
+Creates the daily decision table with:
+- Collapsible warning banner (COLLAPSED by default, click to expand)
+- Backtest results section (if data exists)
+- Post-earnings anchor suppression flags
+- Catalyst-aware date display
+
 Sort: BUY first (shallowest dip = strongest buy), then WAIT (deepest dip first).
 """
 
@@ -9,7 +14,8 @@ import os
 from config import OUTPUT_DIR, OUTPUT_FILE, PERCENTILE_TARGET
 
 
-def generate_html(execution_data, macro_regime, vix, portfolio_data, warnings=None):
+def generate_html(execution_data, macro_regime, vix, portfolio_data,
+                  warnings=None, backtest_results=None):
     if warnings is None:
         warnings = []
 
@@ -25,16 +31,68 @@ def generate_html(execution_data, macro_regime, vix, portfolio_data, warnings=No
         'risk_off': 'RISK-OFF'
     }
 
-    # Warning banner
+    # §Session 2: Warning banner — COLLAPSED by default (click to expand)
     warning_html = ""
     if warnings:
         warning_items = "\n".join(f"<li>{w}</li>" for w in warnings)
         warning_html = f"""
         <div class="warnings">
-            <h3>⚠️ DATA QUALITY WARNINGS ({len(warnings)})</h3>
-            <ul>{warning_items}</ul>
+            <details>
+                <summary>⚠️ DATA QUALITY WARNINGS ({len(warnings)}) — click to expand</summary>
+                <ul>{warning_items}</ul>
+            </details>
         </div>
         """
+
+    # §Session 2: Backtest results section
+    backtest_html = ""
+    if backtest_results:
+        if backtest_results.get('status') == 'insufficient_data':
+            days_have = backtest_results.get('days_available', 0)
+            days_need = backtest_results.get('days_needed', 14)
+            backtest_html = f"""
+            <div class="backtest">
+                <h3>📊 Backtest</h3>
+                <p class="backtest-pending">Collecting data: {days_have}/{days_need} days (need {days_need - days_have} more)</p>
+            </div>
+            """
+        elif backtest_results.get('status') == 'complete':
+            hit_rate = backtest_results.get('hit_rate', 0)
+            total = backtest_results.get('total_wait_signals', 0)
+            hits = backtest_results.get('hits', 0)
+            avg_error = backtest_results.get('avg_error', 0)
+            roi_adv = backtest_results.get('avg_roi_advantage', 0)
+            calibration = backtest_results.get('calibration', '')
+            recommendation = backtest_results.get('recommendation', '')
+
+            cal_class = ''
+            if calibration == 'well_calibrated':
+                cal_class = 'cal-good'
+            elif calibration == 'overconfident':
+                cal_class = 'cal-warn'
+            elif calibration == 'underconfident':
+                cal_class = 'cal-warn'
+
+            backtest_html = f"""
+            <div class="backtest">
+                <h3>📊 Backtest Results</h3>
+                <div class="backtest-stats">
+                    <div class="bt-stat">
+                        <span class="bt-value">{hit_rate:.0%}</span>
+                        <span class="bt-label">Hit Rate ({hits}/{total})</span>
+                    </div>
+                    <div class="bt-stat">
+                        <span class="bt-value">{avg_error:+.1%}</span>
+                        <span class="bt-label">Avg Error</span>
+                    </div>
+                    <div class="bt-stat">
+                        <span class="bt-value">{roi_adv:+.1%}</span>
+                        <span class="bt-label">ROI vs Naive</span>
+                    </div>
+                </div>
+                <p class="bt-calibration {cal_class}">{recommendation}</p>
+            </div>
+            """
 
     # Sort: BUY first (smallest dip = strongest buy),
     # then WAIT (deepest dip first = most rewarding wait)
@@ -58,6 +116,9 @@ def generate_html(execution_data, macro_regime, vix, portfolio_data, warnings=No
         stock_warn = ""
         if data.get('_extreme_dip'):
             stock_warn = '<span class="stock-warn" title="Extreme dip predicted">⚠️</span>'
+        # §Session 2: Post-earnings anchor suppression flag
+        if data.get('_anchor_suppressed'):
+            stock_warn += '<span class="stock-warn" title="Post-earnings: anchor suppressed">🔇</span>'
 
         # Dip percentage
         dip_pct = data.get('dip_pct', 0)
@@ -141,13 +202,37 @@ def generate_html(execution_data, macro_regime, vix, portfolio_data, warnings=No
             background: #2a1a0a; border: 1px solid #ff9800; border-radius: 12px;
             padding: 15px 20px; margin-bottom: 20px;
         }}
-        .warnings h3 {{ color: #ff9800; margin-bottom: 10px; font-size: 1em; }}
-        .warnings ul {{ list-style: none; padding: 0; }}
+        .warnings details summary {{
+            color: #ff9800; font-weight: 600; font-size: 1em;
+            cursor: pointer; list-style: none; padding: 2px 0;
+        }}
+        .warnings details summary::-webkit-details-marker {{ display: none; }}
+        .warnings details summary::before {{
+            content: '▶ '; font-size: 0.8em;
+        }}
+        .warnings details[open] summary::before {{
+            content: '▼ ';
+        }}
+        .warnings ul {{ list-style: none; padding: 10px 0 0 0; }}
         .warnings li {{
             color: #ffb74d; font-size: 0.85em; padding: 3px 0;
             border-bottom: 1px solid #3a2a1a;
         }}
         .warnings li:last-child {{ border-bottom: none; }}
+
+        .backtest {{
+            background: #1a2535; border: 1px solid #4a9eff; border-radius: 12px;
+            padding: 15px 20px; margin-bottom: 20px;
+        }}
+        .backtest h3 {{ color: #4a9eff; margin-bottom: 12px; font-size: 1em; }}
+        .backtest-stats {{ display: flex; gap: 30px; margin-bottom: 10px; }}
+        .bt-stat {{ text-align: center; }}
+        .bt-value {{ display: block; font-size: 1.5em; font-weight: 700; color: #e8eaed; }}
+        .bt-label {{ display: block; font-size: 0.8em; color: #a0a5b0; }}
+        .bt-calibration {{ font-size: 0.9em; color: #a0a5b0; font-style: italic; }}
+        .cal-good {{ color: #66bb6a; }}
+        .cal-warn {{ color: #ffa726; }}
+        .backtest-pending {{ color: #a0a5b0; font-size: 0.9em; }}
 
         .deployment {{
             background: #1a1f35; padding: 20px; border-radius: 12px;
@@ -202,6 +287,7 @@ def generate_html(execution_data, macro_regime, vix, portfolio_data, warnings=No
 
         @media (max-width: 768px) {{
             .deployment-row {{ flex-direction: column; gap: 10px; }}
+            .backtest-stats {{ flex-direction: column; gap: 10px; }}
         }}
     </style>
 </head>
@@ -222,6 +308,8 @@ def generate_html(execution_data, macro_regime, vix, portfolio_data, warnings=No
         </div>
 
         {warning_html}
+
+        {backtest_html}
 
         <div class="deployment">
             <h2>TODAY'S DEPLOYMENT ({datetime.now().strftime("%b %d")})</h2>
