@@ -574,6 +574,9 @@ def fetch_stock_data_fmp(ticker):
     price, quote_data = fetch_current_price_fmp(ticker, hist)
 
     # Session 3: ASML EUR conversion
+    # ASML ticker is US-listed but reports in EUR
+    # We fetch in USD, convert to EUR, and use EUR as current_price
+    # This ensures Monte Carlo simulations and targets are EUR-native
     price_usd = price
     price_eur = None
     fx_rate = None
@@ -582,14 +585,27 @@ def fetch_stock_data_fmp(ticker):
         fx_rate = fetch_fx_rate('EUR', 'USD')
         price_eur = price_usd / fx_rate
         print(f"   💱 {ticker}: ${price_usd:.2f} → €{price_eur:.2f} (EUR/USD {fx_rate:.4f})")
+        
+        # Convert historical data to EUR (Session 3 Fix)
+        if hist is not None and not hist.empty:
+            for col in ['Open', 'High', 'Low', 'Close']:
+                if col in hist.columns:
+                    hist[col] = hist[col] / fx_rate
+
+    # Convert ASML analyst price targets to EUR (Session 3 Fix)
+    targets = fetch_price_targets_fmp(ticker)
+    if ticker == 'ASML' and price_eur and fx_rate and targets:
+        for key in ['targetMean', 'targetHigh', 'targetLow', 'targetMedian']:
+            if targets.get(key):
+                targets[key] = targets[key] / fx_rate
 
     return {
         'ticker': ticker,
         'historical': hist,
-        'current_price': price,
+        'current_price': price_eur if (ticker == 'ASML' and price_eur) else price,  # Session 3 Fix: ASML in EUR
         'quote_data': quote_data,
         # Original endpoints
-        'price_targets': fetch_price_targets_fmp(ticker),
+        'price_targets': targets,
         'earnings_date': fetch_earnings_fmp(ticker),
         'analyst_grade': fetch_grades_fmp(ticker),
         'momentum': fetch_momentum_fmp(ticker),
@@ -691,18 +707,8 @@ def fetch_portfolio_data():
             # LDO.MI: Eulerpool complete (OHLC + enrichment)
             portfolio_data[ticker] = fetch_stock_data_ldomi(ticker)
         else:
-            # US stocks: FMP (with ASML EUR conversion)
+            # US stocks: FMP (with ASML EUR conversion inline)
             portfolio_data[ticker] = fetch_stock_data_fmp(ticker)
-    
-    # Convert ASML analyst targets to EUR if available
-    if 'ASML' in portfolio_data and portfolio_data['ASML']:
-        asml = portfolio_data['ASML']
-        if asml.get('_price_eur') and asml.get('price_targets'):
-            fx_rate = asml['_fx_rate']
-            targets = asml['price_targets']
-            for key in ['targetMean', 'targetHigh', 'targetLow', 'targetMedian']:
-                if targets.get(key):
-                    targets[f'{key}_eur'] = targets[key] / fx_rate
 
     ok = sum(1 for d in portfolio_data.values() if d and d.get('current_price') is not None)
     print(f"\n   Data fetched: {ok}/{len(PORTFOLIO)} stocks with price data")
