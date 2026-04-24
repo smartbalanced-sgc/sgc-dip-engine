@@ -2,7 +2,7 @@
 Correlated Monte Carlo Simulation Engine
 10,000 correlated price paths × 60 days per stock
 
-PHASE 2 ENRICHMENT (Apr 2026):
+PHASE 2 ENRICHMENT (23 Apr 2026):
   Five data streams now feed into the MC simulation:
     1. RSI → drift modifier (overbought = dip more likely)
     2. Sentiment → drift modifier (Claude API score)
@@ -18,6 +18,8 @@ SESSION 2 ENHANCEMENTS:
   - Time-varying volatility: vol spikes on earnings/macro days instead of uniform
   - build_volatility_schedule() creates per-day vol array
   - MC loop uses daily vol when schedule is enabled
+  - CRITICAL: When schedule is enabled, enrichment vol multiplier is excluded
+    from base_vol because the schedule REPLACES uniform earnings vol, not stacks.
 
 CONVICTION MODEL:
   Dip target = 60th percentile of path minimums.
@@ -101,7 +103,8 @@ def compute_enrichment_modifiers(stock_data):
     total_drift = max(-0.10, min(0.10, total_drift))
 
     # --- Earnings vol multiplier ---
-    # Imminent earnings → vol spike (earnings cause big moves)
+    # Used ONLY when time-varying vol schedule is DISABLED (Phase 2 fallback).
+    # When schedule is enabled, this multiplier is ignored — schedule handles it.
     # Within 14 days: × 1.5
     # Within 14-30 days: × 1.3
     # Within 30-60 days: × 1.15
@@ -321,9 +324,13 @@ def simulate_portfolio(portfolio_data, corr_matrix, ticker_order, regime_info, m
         volatility = calculate_forward_volatility(data['historical'])
 
         # §Session 2: Build time-varying vol schedule if enabled
+        # CRITICAL: When schedule is enabled, do NOT include enrichment vol_multiplier
+        # in base_vol. The schedule REPLACES the uniform earnings multiplier.
+        # Including both would double-count: base×1.5 (uniform) × 3.0 (schedule) = 4.5×
+        # Correct: base × 3.0 (schedule only) on earnings day, base × 1.0 elsewhere
         vol_schedule = None
         if use_vol_schedule:
-            base_vol = volatility * combined_vol * enrichment['vol_multiplier']
+            base_vol = volatility * combined_vol  # No enrichment vol — schedule handles it
             vol_schedule = build_volatility_schedule(
                 base_vol=base_vol,
                 earnings_date=data.get('earnings_date'),
