@@ -90,28 +90,39 @@ def run_backtest(portfolio_data=None):
     """
     Run backtest on accumulated signal history.
 
-    Returns dict with:
-      - has_data: bool (enough history to backtest?)
-      - days_of_data: int
-      - total_signals: int
-      - wait_signals: int
-      - targets_hit: int
+    Returns dict with keys matching dashboard_generator interface:
+      - status: 'insufficient_data' or 'complete'
+      - days_available: int
+      - days_needed: int (only if insufficient)
+      - total_wait_signals: int
+      - hits: int
       - hit_rate: float
-      - avg_error: float (predicted dip% - actual dip%)
-      - roi_vs_naive: float (% improvement from waiting)
-      - calibration: str ('well_calibrated', 'overconfident', 'underconfident')
-      - by_ticker: dict of per-ticker stats
+      - avg_error: float
+      - avg_roi_advantage: float
+      - calibration: str
+      - recommendation: str
+      - by_ticker: dict
     """
     signals = load_signal_history()
 
     if len(signals) == 0:
-        return {'has_data': False, 'reason': 'No signal history found'}
+        return {
+            'status': 'insufficient_data',
+            'days_available': 0,
+            'days_needed': MIN_HISTORY_DAYS,
+            'message': 'No signal history found'
+        }
 
     # Filter to WAIT signals only (BUY signals aren't testable)
     wait_signals = [s for s in signals if s.get('signal') == 'WAIT']
 
     if len(wait_signals) == 0:
-        return {'has_data': False, 'reason': 'No WAIT signals in history'}
+        return {
+            'status': 'insufficient_data',
+            'days_available': 0,
+            'days_needed': MIN_HISTORY_DAYS,
+            'message': 'No WAIT signals in history'
+        }
 
     # Check if we have enough days of data
     dates = sorted(set(s.get('date', '') for s in signals))
@@ -119,10 +130,10 @@ def run_backtest(portfolio_data=None):
 
     if days_of_data < MIN_HISTORY_DAYS:
         return {
-            'has_data': False,
-            'reason': f'Need {MIN_HISTORY_DAYS} days of history, have {days_of_data}',
-            'days_of_data': days_of_data,
-            'days_needed': MIN_HISTORY_DAYS
+            'status': 'insufficient_data',
+            'days_available': days_of_data,
+            'days_needed': MIN_HISTORY_DAYS,
+            'message': f'Need {MIN_HISTORY_DAYS - days_of_data} more days of data'
         }
 
     # Only backtest signals old enough to have outcomes
@@ -141,9 +152,10 @@ def run_backtest(portfolio_data=None):
 
     if len(testable) == 0:
         return {
-            'has_data': False,
-            'reason': f'No signals old enough to test (need 14+ days). Have {days_of_data} days of data.',
-            'days_of_data': days_of_data
+            'status': 'insufficient_data',
+            'days_available': days_of_data,
+            'days_needed': MIN_HISTORY_DAYS,
+            'message': f'No signals old enough to test (need 14+ days)'
         }
 
     # Run backtest on testable signals
@@ -204,38 +216,43 @@ def run_backtest(portfolio_data=None):
     total_tested = hits + misses
     if total_tested == 0:
         return {
-            'has_data': False,
-            'reason': 'Could not match signals to price data',
-            'days_of_data': days_of_data
+            'status': 'insufficient_data',
+            'days_available': days_of_data,
+            'days_needed': MIN_HISTORY_DAYS,
+            'message': 'Could not match signals to price data'
         }
 
     hit_rate = hits / total_tested
     avg_error = sum(errors) / len(errors) if errors else 0
     avg_roi = sum(roi_improvements) / len(roi_improvements) if roi_improvements else 0
 
-    # Calibration assessment
+    # Calibration assessment + recommendation
     if hit_rate < TARGET_HIT_RATE_MIN:
         calibration = 'overconfident'
+        recommendation = f'Lower PERCENTILE_TARGET (hit rate {hit_rate:.0%} below {TARGET_HIT_RATE_MIN:.0%} target)'
     elif hit_rate > TARGET_HIT_RATE_MAX:
         calibration = 'underconfident'
+        recommendation = f'Raise PERCENTILE_TARGET (hit rate {hit_rate:.0%} above {TARGET_HIT_RATE_MAX:.0%} target)'
     else:
         calibration = 'well_calibrated'
+        recommendation = 'No tuning needed'
 
     # Per-ticker hit rates
     for ticker, stats in by_ticker.items():
         if stats['signals'] > 0:
             stats['hit_rate'] = stats['hits'] / stats['signals']
 
+    print(f"   📊 Backtest: {hits}/{total_tested} hits ({hit_rate:.0%}), avg error {avg_error:+.1%}")
+
     return {
-        'has_data': True,
-        'days_of_data': days_of_data,
-        'total_signals': len(wait_signals),
-        'testable_signals': total_tested,
-        'targets_hit': hits,
-        'targets_missed': misses,
+        'status': 'complete',
+        'days_available': days_of_data,
+        'total_wait_signals': total_tested,
+        'hits': hits,
         'hit_rate': hit_rate,
         'avg_error': avg_error,
-        'avg_roi_vs_naive': avg_roi,
+        'avg_roi_advantage': avg_roi,
         'calibration': calibration,
+        'recommendation': recommendation,
         'by_ticker': by_ticker,
     }
