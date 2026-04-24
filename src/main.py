@@ -1,5 +1,5 @@
 """
-Main Orchestrator — SGC Dip Engine v6
+Main Orchestrator — SGC Dip Engine v7
 Pipeline with Phase 2 enrichment + Session 2 intelligence:
   Data → GATE 1 → Regimes → GATE 2 → Sentiment → Correlation → MC → GATE 3 → Signals → GATE 4 → Dashboard
 
@@ -201,7 +201,7 @@ def main():
     if get_config('backtest', 'enabled', default=False):
         print("\n📊 Running backtest...")
         try:
-            backtest_results = run_backtest()
+            backtest_results = run_backtest(portfolio_data=portfolio_data)
         except Exception as e:
             print(f"   ⚠️  Backtest failed: {e}")
 
