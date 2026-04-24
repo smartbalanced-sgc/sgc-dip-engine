@@ -169,6 +169,20 @@ def generate_html(execution_data, macro_regime, vix, portfolio_data,
                 <div class="target-row">{target_display}</div>
                 <div class="confidence-row">{conviction_display}</div>
                 <div class="oneliner">{data['one_liner']}</div>
+                
+                # Session 3: Fallback signal rendering
+            if stock.get('fallback'):
+                fb = stock['fallback']
+                currency = get_currency_symbol(stock['ticker'], portfolio_data)
+            
+                # Format fallback action
+                fb_action = 'BUY NOW' if fb['signal'] == 'BUY' else f"BUY at {currency}{fb['price']:.2f}"
+            
+                card_html += f'''
+                <div style="font-size: 13px; color: #888; margin-top: 8px; padding-left: 16px; border-left: 2px solid #444;">
+                    └─ Fallback: {fb_action} ({fb['dip_pct']*100:.1f}% dip, {fb['confidence']*100:.0f}% conviction) {fb['date_range']}
+                </div>
+            '''
             </td>
             <td class="earnings">{earnings_display}</td>
         </tr>
