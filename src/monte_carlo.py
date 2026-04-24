@@ -378,6 +378,9 @@ def simulate_portfolio(portfolio_data, corr_matrix, ticker_order, regime_info, m
             'percentile_low': stats['percentile_low'],
             'confidence': stats['confidence'],
             'median_date_index': stats['median_date_index'],
+            'fallback_low': stats['fallback_low'],
+            'fallback_confidence': stats['fallback_confidence'],
+            'fallback_date_index': stats['fallback_date_index'],
             'paths': paths
         }
 
