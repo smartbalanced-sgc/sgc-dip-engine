@@ -234,6 +234,7 @@ def process_execution_signals(simulation_results, portfolio_data=None, macro_eve
             '_no_dip': result.get('_no_dip', False),
             '_anchor_suppressed': anchor_suppressed,
             '_suppress_reason': suppress_reason,
+            'fallback': fallback,  # Session 3: NEW FIELD
         }
 
     return execution_data
