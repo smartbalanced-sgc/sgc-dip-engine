@@ -1,11 +1,12 @@
 """
-HTML Dashboard Generator — Session 2
+HTML Dashboard Generator — Session 3
 Creates the daily decision table with:
 - Collapsible warning banner (COLLAPSED by default, click to expand)
 - Backtest results section with description
 - Post-earnings anchor suppression flags
 - Catalyst-aware date display
-- Currency-aware price display (€ for .MI tickers, $ for US)
+- Currency-aware price display (€ for .MI tickers, $ for US, € for ASML)
+- Fallback signals (80th percentile high-conviction alternative)
 
 Sort: BUY first (shallowest dip = strongest buy), then WAIT (deepest dip first).
 """
@@ -120,7 +121,7 @@ def generate_html(execution_data, macro_regime, vix, portfolio_data,
         earnings_display = f"{earnings} ⚡" if earnings else "—"
 
         signal_icon = "🟢" if data['signal'] == 'BUY' else "⏳"
-        ccy = get_currency_symbol(ticker)
+        ccy = get_currency_symbol(ticker, portfolio_data)
 
         # Per-stock warning indicator
         stock_warn = ""
@@ -129,6 +130,12 @@ def generate_html(execution_data, macro_regime, vix, portfolio_data,
         # §Session 2: Post-earnings anchor suppression flag
         if data.get('_anchor_suppressed'):
             stock_warn += '<span class="stock-warn" title="Post-earnings: anchor suppressed">🔇</span>'
+
+        # Session 3: Display price (EUR for ASML, native currency for others)
+        if ticker == 'ASML' and p_data.get('_price_eur'):
+            display_price = p_data['_price_eur']
+        else:
+            display_price = data['current_price']
 
         # Dip percentage
         dip_pct = data.get('dip_pct', 0)
@@ -156,6 +163,17 @@ def generate_html(execution_data, macro_regime, vix, portfolio_data,
         # Conviction display (fixed at PERCENTILE_TARGET%)
         conviction_display = f"Conviction: {PERCENTILE_TARGET}%"
 
+        # Session 3: Fallback signal rendering
+        fallback_html = ""
+        if data.get('fallback'):
+            fb = data['fallback']
+            fb_action = 'BUY NOW' if fb['signal'] == 'BUY' else f"BUY at {ccy}{fb['price']:.2f}"
+            fallback_html = f'''
+                <div style="font-size: 13px; color: #888; margin-top: 8px; padding-left: 16px; border-left: 2px solid #444;">
+                    └─ Fallback: {fb_action} ({fb['dip_pct']*100:.1f}% dip, {fb['confidence']*100:.0f}% conviction) {fb['date_range']}
+                </div>
+            '''
+
         table_rows += f"""
         <tr>
             <td class="ticker">{ticker} {stock_warn}</td>
@@ -165,24 +183,11 @@ def generate_html(execution_data, macro_regime, vix, portfolio_data,
                     <span class="signal-text">{data['signal']}</span>
                     {rsi_display}
                 </div>
-                <div class="price-row">{ccy}{data['current_price']:.2f} (today)</div>
+                <div class="price-row">{ccy}{display_price:.2f} (today)</div>
                 <div class="target-row">{target_display}</div>
                 <div class="confidence-row">{conviction_display}</div>
                 <div class="oneliner">{data['one_liner']}</div>
-                
-                # Session 3: Fallback signal rendering
-            if stock.get('fallback'):
-                fb = stock['fallback']
-                currency = get_currency_symbol(stock['ticker'], portfolio_data)
-            
-                # Format fallback action
-                fb_action = 'BUY NOW' if fb['signal'] == 'BUY' else f"BUY at {currency}{fb['price']:.2f}"
-            
-                card_html += f'''
-                <div style="font-size: 13px; color: #888; margin-top: 8px; padding-left: 16px; border-left: 2px solid #444;">
-                    └─ Fallback: {fb_action} ({fb['dip_pct']*100:.1f}% dip, {fb['confidence']*100:.0f}% conviction) {fb['date_range']}
-                </div>
-            '''
+                {fallback_html}
             </td>
             <td class="earnings">{earnings_display}</td>
         </tr>
