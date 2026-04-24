@@ -461,21 +461,27 @@ def fetch_stock_data_yfinance(ticker):
     """
     Primary fetcher for LDO.MI (yfinance has fresher data + volume vs Eulerpool).
     Returns same structure as FMP for consistency.
+    
+    Uses Ticker.history() instead of yf.download() for cleaner column handling
+    and better reliability on GitHub Actions environment.
     """
     try:
         import yfinance as yf
+        import time
         
-        # Fetch 2 years of data
-        end_date = datetime.now()
-        start_date = end_date - timedelta(days=LOOKBACK_DAYS)
+        # Small delay to avoid rate limiting on GitHub Actions
+        time.sleep(1)
         
-        data = yf.download(ticker, start=start_date, end=end_date, progress=False, auto_adjust=False)
+        # Use Ticker.history() for more reliable fetching (cleaner output than download())
+        stock = yf.Ticker(ticker)
+        data = stock.history(period='2y', auto_adjust=True)
         
         if data.empty:
             print(f"   ⚠️  yfinance returned no data for {ticker}")
             return None
         
         # Convert to FMP-compatible format
+        # Note: Ticker.history() returns simple column names, not multi-index
         df = pd.DataFrame({
             'Date': data.index.strftime('%Y-%m-%d'),
             'Open': data['Open'].values,
@@ -662,7 +668,18 @@ def fetch_portfolio_data():
     for ticker in PORTFOLIO.keys():
         if ticker in YFINANCE_TICKERS:
             # LDO.MI: yfinance primary + Eulerpool enrichment
-            portfolio_data[ticker] = fetch_stock_data_ldomi(ticker)
+            result = fetch_stock_data_ldomi(ticker)
+            if result:
+                portfolio_data[ticker] = result
+            else:
+                # yfinance failed (GitHub Actions rate limit)
+                # Add minimal dict so validators can skip cleanly
+                portfolio_data[ticker] = {
+                    'ticker': ticker,
+                    'current_price': None,
+                    'historical': None,
+                    '_skip': True
+                }
         else:
             # US stocks: FMP (with ASML EUR conversion)
             portfolio_data[ticker] = fetch_stock_data_fmp(ticker)
