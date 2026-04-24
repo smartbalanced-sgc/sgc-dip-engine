@@ -1,18 +1,19 @@
 """
-Data Fetcher — SGC Dip Engine v7 (Session 3 Upgrade)
+Data Fetcher — SGC Dip Engine v7 (Session 3 Production)
 - FMP API for 13 US stocks (15 endpoints per stock + 2 macro)
-- yfinance for LDO.MI (primary — fresher data + volume vs Eulerpool)
-- Eulerpool API for LDO.MI enrichment (optional, graceful degradation)
+- Eulerpool API for LDO.MI (complete primary source — all 14/16 fields)
 - ASML EUR conversion for display (user buys on Trading212 in EUR)
 
 FMP stable API pattern: symbol in query params, NOT path
 Endpoint: historical-price-eod/full (NOT historical-price-full)
 Ref: rationale.md §2.1, §2.2, §3.1-§3.6
 
-Session 3 Changes:
-- LDO.MI: yfinance primary (fresh + volume), Eulerpool enrichment
+Session 3 Production:
+- LDO.MI: Eulerpool complete (OHLC 230 days, beta, targets, estimates, grades, insider, AAQS)
+- Corrected endpoint paths: /research/recommendations, /sentiment/price-metrics, /sentiment/insider-sentiment
 - ASML: Fetch USD ADR, convert to EUR for display (1:1 ratio)
 - FX rates: exchangerate-api.com (FMP doesn't support on Starter plan)
+- yfinance REMOVED (unreliable on GitHub Actions, Eulerpool provides all needed fields)
 """
 
 import requests
@@ -344,71 +345,136 @@ def eulerpool_get(endpoint, ticker):
         return None
 
 
-def fetch_stock_data_eulerpool(ticker):
+def fetch_historical_eulerpool(ticker):
     """
-    Fetch LDO.MI enrichment from Eulerpool (price targets, estimates, grades).
-    Returns dict with enrichment fields or None if fetch fails.
-    Does NOT include historical data — that comes from yfinance.
+    Eulerpool /equity/candles endpoint — 230 days of OHLC (no volume).
+    Returns DataFrame compatible with FMP format.
+    Validated endpoint: https://api.eulerpool.com/api/1/equity/candles/{ticker}?range=1y
     """
     if not EULERPOOL_TOKEN:
         return None
     
-    # 1. PRICE TARGETS — /equity-extended/price-targets/
-    targets_data = eulerpool_get(f"equity-extended/price-targets/{ticker}", ticker) or []
+    url = f"https://api.eulerpool.com/api/1/equity/candles/{ticker}"
+    params = {"range": "1y", "token": EULERPOOL_TOKEN}
+    time.sleep(API_DELAY)
+    
+    try:
+        resp = requests.get(url, params=params, timeout=API_TIMEOUT)
+        if resp.status_code != 200:
+            print(f"      Eulerpool candles {resp.status_code}")
+            return None
+        
+        data = resp.json()
+        if not isinstance(data, list) or len(data) < 50:
+            print(f"      Eulerpool candles insufficient data: {len(data) if isinstance(data, list) else 0}")
+            return None
+        
+        # Convert Eulerpool format to FMP-compatible DataFrame
+        # Eulerpool returns: [{"timestamp": ms, "open": float, "high": float, "low": float, "close": float}, ...]
+        rows = []
+        for candle in data:
+            timestamp_ms = candle.get('timestamp')
+            if not timestamp_ms:
+                continue
+            
+            date = datetime.fromtimestamp(timestamp_ms / 1000).strftime('%Y-%m-%d')
+            rows.append({
+                'Date': date,
+                'Open': float(candle.get('open', 0)),
+                'High': float(candle.get('high', 0)),
+                'Low': float(candle.get('low', 0)),
+                'Close': float(candle.get('close', 0)),
+                'Volume': 0  # Eulerpool doesn't provide volume
+            })
+        
+        if len(rows) < 50:
+            print(f"      Eulerpool candles insufficient rows after parsing: {len(rows)}")
+            return None
+        
+        df = pd.DataFrame(rows)
+        df = df.sort_values('Date').reset_index(drop=True)
+        
+        print(f"   ✅ {ticker}: {len(df)} days (Eulerpool candles, no volume)")
+        return df
+        
+    except Exception as e:
+        print(f"      Eulerpool candles error: {e}")
+        return None
+
+
+def fetch_stock_data_eulerpool(ticker):
+    """
+    Fetch LDO.MI enrichment from Eulerpool with CORRECTED endpoint paths.
+    All paths validated via terminal testing on 2026-04-24.
+    
+    Returns dict with enrichment fields or None if critical fields fail.
+    """
+    if not EULERPOOL_TOKEN:
+        return None
+    
+    # 1. PRICE TARGETS — /equity/price-target/ (CORRECTED: singular, not plural!)
+    targets_data = eulerpool_get(f"equity/price-target/{ticker}", ticker) or {}
     price_targets = {}
-    if isinstance(targets_data, list) and len(targets_data) > 0:
-        sorted_targets = sorted(targets_data, key=lambda x: x.get('date', ''), reverse=True)
-        latest = sorted_targets[0]
+    if isinstance(targets_data, dict):
         price_targets = {
-            'targetMean': latest.get('average'),
-            'targetHigh': latest.get('high'),
-            'targetLow': latest.get('low'),
-            'targetMedian': None
+            'targetMean': targets_data.get('target_mean'),
+            'targetHigh': targets_data.get('target_high'),
+            'targetLow': targets_data.get('target_low'),
+            'targetMedian': targets_data.get('target_median')
         }
     
-    # 2. EARNINGS DATE PROXY — use latest financial report date + 90 days
-    financials_data = eulerpool_get(f"financials/income-statements/{ticker}", ticker) or []
+    # 2. EARNINGS DATE PROXY — /equity/fundamentals-quarterly/ (CORRECTED endpoint)
+    financials_data = eulerpool_get(f"equity/fundamentals-quarterly/{ticker}", ticker) or []
     earnings_date = None
     if isinstance(financials_data, list) and len(financials_data) > 0:
-        sorted_fin = sorted(financials_data, key=lambda x: x.get('date', ''), reverse=True)
-        latest_fin_date_str = sorted_fin[0].get('date')
-        if latest_fin_date_str:
-            try:
-                latest_fin_date = datetime.strptime(latest_fin_date_str, '%Y-%m-%d')
-                next_earnings = latest_fin_date + timedelta(days=90)
-                if next_earnings.date() >= datetime.now().date():
-                    earnings_date = next_earnings.strftime('%Y-%m-%d')
-            except:
-                pass
+        # Find first future quarter
+        for quarter in financials_data:
+            period = quarter.get('period', '')
+            if period.endswith('e'):  # 'e' suffix indicates estimate/future
+                try:
+                    # Parse quarter period (e.g., "2026-Q2e" → estimate Q2 end date)
+                    year = quarter.get('year')
+                    quarter_num = int(period.split('-Q')[1][0])
+                    # Approximate quarter end dates
+                    quarter_end_month = quarter_num * 3
+                    earnings_date = f"{year}-{quarter_end_month:02d}-01"
+                    break
+                except:
+                    pass
     
-    # 3. FORWARD ESTIMATES — /equity-extended/estimates/
-    estimates_data = eulerpool_get(f"equity-extended/estimates/{ticker}", ticker) or []
+    # 3. FORWARD ESTIMATES — /equity/estimates/ (CORRECTED: removed /equity-extended/)
+    estimates_data = eulerpool_get(f"equity/estimates/{ticker}", ticker) or []
     forward_estimates = {}
     if isinstance(estimates_data, list) and len(estimates_data) > 0:
-        annual_est = [e for e in estimates_data if e.get('period_type') == 'FY']
+        # Get latest annual estimate
+        annual_est = [e for e in estimates_data if e.get('period') == 'FY']
         if annual_est:
-            sorted_est = sorted(annual_est, key=lambda x: x.get('fiscal_year', 0), reverse=True)
-            latest_est = sorted_est[0]
+            latest = annual_est[0]
             forward_estimates = {
-                'epsAvg': latest_est.get('eps_mean'),
-                'numAnalysts': latest_est.get('number_of_analysts')
+                'epsAvg': latest.get('epsEstimate'),
+                'numAnalysts': latest.get('epsAnalysts')
             }
     
-    # 4. PROFILE — /equity/profile/
+    # 4. PROFILE — /equity/profile/ (sector, company name)
     profile_data = eulerpool_get(f"equity/profile/{ticker}", ticker) or {}
+    
+    # 4b. BETA — /sentiment/price-metrics/ (CORRECTED: beta is HERE, not in profile!)
+    price_metrics = eulerpool_get(f"sentiment/price-metrics/{ticker}", ticker) or {}
+    beta = price_metrics.get('beta')
+    
     profile = {
-        'beta': profile_data.get('beta'),
+        'beta': beta,  # From price-metrics, not profile
         'sector': profile_data.get('sector', 'Industrials'),
         'companyName': profile_data.get('name')
     }
     
-    # 5. GRADES CONSENSUS — /equity-extended/recommendations/
-    recs_data = eulerpool_get(f"equity-extended/recommendations/{ticker}", ticker) or []
+    # 5. GRADES CONSENSUS — /research/recommendations/ (CORRECTED: /research/, not /equity-extended/)
+    recs_data = eulerpool_get(f"research/recommendations/{ticker}", ticker) or []
     grades_consensus = {}
     target_trend = {}
     if isinstance(recs_data, list) and len(recs_data) > 0:
-        sorted_recs = sorted(recs_data, key=lambda x: x.get('period', ''), reverse=True)
-        latest = sorted_recs[0]
+        # Latest month's ratings
+        latest = recs_data[0]
         grades_consensus = {
             'strongBuy': latest.get('strongBuy', 0),
             'buy': latest.get('buy', 0),
@@ -416,13 +482,14 @@ def fetch_stock_data_eulerpool(ticker):
             'sell': latest.get('sell', 0),
             'strongSell': latest.get('strongSell', 0)
         }
-        if len(sorted_recs) >= 3:
+        # Target trend: compare recent months
+        if len(recs_data) >= 3:
             target_trend = {
-                'lastMonthAvg': sorted_recs[0].get('targetMean'),
-                'lastQuarterAvg': sorted_recs[2].get('targetMean')
+                'lastMonthAvg': recs_data[0].get('targetMean'),
+                'lastQuarterAvg': recs_data[2].get('targetMean')
             }
     
-    # 6. FINANCIAL SCORES — /equity-extended/aaqs/
+    # 6. FINANCIAL SCORES — /equity-extended/aaqs/ (path already correct)
     aaqs_data = eulerpool_get(f"equity-extended/aaqs/{ticker}", ticker) or {}
     financial_scores = {
         'aaqs': aaqs_data.get('score'),
@@ -430,7 +497,7 @@ def fetch_stock_data_eulerpool(ticker):
         'piotroskiScore': None
     }
     
-    # 7. INSIDER STATS — /sentiment/insider-sentiment/
+    # 7. INSIDER STATS — /sentiment/insider-sentiment/ (CORRECTED: /sentiment/, not /equity/)
     insider_data = eulerpool_get(f"sentiment/insider-sentiment/{ticker}", ticker) or []
     insider_stats = {}
     if isinstance(insider_data, list) and len(insider_data) > 0:
@@ -454,56 +521,8 @@ def fetch_stock_data_eulerpool(ticker):
 
 
 # =============================================================
-# YFINANCE WRAPPER (LDO.MI primary — Session 3)
+# HELPER FUNCTIONS (Momentum & RSI computed from historical data)
 # =============================================================
-
-def fetch_stock_data_yfinance(ticker):
-    """
-    Primary fetcher for LDO.MI (yfinance has fresher data + volume vs Eulerpool).
-    Returns same structure as FMP for consistency.
-    
-    Uses Ticker.history() instead of yf.download() for cleaner column handling
-    and better reliability on GitHub Actions environment.
-    """
-    try:
-        import yfinance as yf
-        import time
-        
-        # Small delay to avoid rate limiting on GitHub Actions
-        time.sleep(1)
-        
-        # Use Ticker.history() for more reliable fetching (cleaner output than download())
-        stock = yf.Ticker(ticker)
-        data = stock.history(period='2y', auto_adjust=True)
-        
-        if data.empty:
-            print(f"   ⚠️  yfinance returned no data for {ticker}")
-            return None
-        
-        # Convert to FMP-compatible format
-        # Note: Ticker.history() returns simple column names, not multi-index
-        df = pd.DataFrame({
-            'Date': data.index.strftime('%Y-%m-%d'),
-            'Open': data['Open'].values,
-            'High': data['High'].values,
-            'Low': data['Low'].values,
-            'Close': data['Close'].values,
-            'Volume': data['Volume'].values.astype(float)  # Ensure float type
-        })
-        
-        rows = len(df)
-        last_date = df['Date'].iloc[-1]
-        last_price = float(df['Close'].iloc[-1])
-        mean_volume = float(df['Volume'].mean())
-        
-        print(f"   ✅ {ticker}: {rows} days, €{last_price:.2f}, vol {mean_volume:,.0f} (yfinance)")
-        
-        return df
-        
-    except Exception as e:
-        print(f"   ⚠️  yfinance fetch failed for {ticker}: {e}")
-        return None
-
 
 def compute_momentum(hist_df):
     """Compute 1M/3M/6M momentum from historical data"""
@@ -592,25 +611,28 @@ def fetch_stock_data_fmp(ticker):
 
 def fetch_stock_data_ldomi(ticker):
     """
-    Session 3: Fetch LDO.MI with yfinance primary, Eulerpool enrichment.
-    yfinance provides: fresh OHLCV data with volume
-    Eulerpool provides: price targets, estimates, grades (if available)
-    """
-    print(f"   📊 {ticker} (yfinance primary)...")
+    Session 3 Production: Fetch LDO.MI using ONLY Eulerpool (complete data source).
     
-    # Get historical data from yfinance (fresh + volume)
-    hist = fetch_stock_data_yfinance(ticker)
+    Eulerpool provides all 14/16 fields via corrected endpoints:
+    - OHLC: 230 days from /equity/candles (no volume)
+    - Enrichment: targets, estimates, grades, beta, insider, AAQS
+    
+    yfinance REMOVED (unreliable on GitHub Actions, Eulerpool is sufficient).
+    """
+    print(f"   📊 {ticker} (Eulerpool complete)...")
+    
+    # Get historical OHLC from Eulerpool candles
+    hist = fetch_historical_eulerpool(ticker)
     if hist is None:
-        print(f"   ❌ {ticker}: yfinance failed, skipping")
+        print(f"   ❌ {ticker}: Eulerpool candles failed, skipping")
         return None
     
     current_price = float(hist['Close'].iloc[-1])
     
-    # Try Eulerpool for enrichment fields
+    # Get enrichment fields from Eulerpool
     eulerpool_bundle = fetch_stock_data_eulerpool(ticker)
     
     if eulerpool_bundle:
-        # Eulerpool succeeded — use its enrichment fields
         price_targets = eulerpool_bundle.get('price_targets', {})
         earnings_date = eulerpool_bundle.get('earnings_date')
         forward_estimates = eulerpool_bundle.get('forward_estimates', {})
@@ -619,11 +641,9 @@ def fetch_stock_data_ldomi(ticker):
         target_trend = eulerpool_bundle.get('target_trend', {})
         financial_scores = eulerpool_bundle.get('financial_scores', {})
         insider_stats = eulerpool_bundle.get('insider_stats', {})
-        
-        print(f"   ✅ {ticker}: yfinance candles + Eulerpool enrichment")
     else:
-        # Eulerpool failed — use minimal bundle
-        print(f"   ⚠️  {ticker}: Eulerpool enrichment unavailable, using yfinance only")
+        # Eulerpool enrichment failed — use minimal defaults
+        print(f"   ⚠️  {ticker}: Eulerpool enrichment unavailable, using candles only")
         price_targets = {}
         earnings_date = None
         forward_estimates = {}
@@ -633,7 +653,7 @@ def fetch_stock_data_ldomi(ticker):
         financial_scores = {}
         insider_stats = {}
     
-    # Compute momentum and RSI from yfinance historical
+    # Compute momentum and RSI from Eulerpool historical
     momentum = compute_momentum(hist)
     rsi = compute_rsi(hist)
     
@@ -652,8 +672,9 @@ def fetch_stock_data_ldomi(ticker):
         'rsi': rsi,
         'financial_scores': financial_scores,
         'insider_stats': insider_stats,
-        'analyst_grade': {},  # Eulerpool upgrades endpoint typically empty for LDO.MI
-        'dcf_value': None  # Eulerpool doesn't provide DCF
+        'analyst_grade': {},  # Eulerpool /equity/upgrades returns empty for LDO.MI
+        'dcf_value': None,    # Eulerpool doesn't provide DCF
+        '_no_volume': True    # Flag for validators (Eulerpool candles have Volume=0)
     }
 
 
@@ -667,19 +688,8 @@ def fetch_portfolio_data():
 
     for ticker in PORTFOLIO.keys():
         if ticker in YFINANCE_TICKERS:
-            # LDO.MI: yfinance primary + Eulerpool enrichment
-            result = fetch_stock_data_ldomi(ticker)
-            if result:
-                portfolio_data[ticker] = result
-            else:
-                # yfinance failed (GitHub Actions rate limit)
-                # Add minimal dict so validators can skip cleanly
-                portfolio_data[ticker] = {
-                    'ticker': ticker,
-                    'current_price': None,
-                    'historical': None,
-                    '_skip': True
-                }
+            # LDO.MI: Eulerpool complete (OHLC + enrichment)
+            portfolio_data[ticker] = fetch_stock_data_ldomi(ticker)
         else:
             # US stocks: FMP (with ASML EUR conversion)
             portfolio_data[ticker] = fetch_stock_data_fmp(ticker)
