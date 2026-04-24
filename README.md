@@ -1,4 +1,4 @@
-# SGC Dip Engine v6
+# SGC Dip Engine for Portfolio v7
 
 **Purpose:** Daily BUY/WAIT signal generator for a 14-stock DCA portfolio. Tells the investor whether today's price is the best entry or if a meaningful dip is likely within 60 days.
 
