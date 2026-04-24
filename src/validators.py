@@ -1,5 +1,5 @@
 """
-SGC Dip Engine v6 — Validation & Guardrail Layer
+SGC Dip Engine v7 — Validation & Guardrail Layer
 
 Four-gate validation pipeline that prevents garbage signals from
 reaching the dashboard. Each gate validates at a pipeline stage.
