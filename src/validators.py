@@ -83,6 +83,16 @@ def validate_input_data(portfolio_data):
         # --- Freshness check ---
         last_date = pd.to_datetime(hist['Date'].iloc[-1]).date()
         days_stale = (today - last_date).days
+        data['_data_age_days'] = days_stale  # Store for later checks
+        
+        # Session 3 Fix: SKIP if data extremely stale (>10 days)
+        # Trading on 2+ week old prices is unreliable
+        if days_stale > 10:
+            warnings.append(f"{ticker}: Data {days_stale} days old (last: {last_date}) — TOO STALE, SKIPPED")
+            data['_skip'] = True
+            continue
+        
+        # Warn if moderately stale (>5 days but ≤10 days)
         if days_stale > HIST_MAX_STALE_DAYS:
             warnings.append(f"{ticker}: Data {days_stale} days old (last: {last_date}). Signal may lag recent moves.")
 
