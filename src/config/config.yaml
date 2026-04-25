@@ -27,10 +27,6 @@ portfolio:
     - VST
     - CEG
     - LDO.MI
-    - AAPL
-    - BARC.L
-    - JNJ
-    - TSLA
   
   # Portfolio weights (Constitution v7)
   # Used for display and future weighted correlation
