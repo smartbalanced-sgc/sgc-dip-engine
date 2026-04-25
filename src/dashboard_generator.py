@@ -14,14 +14,12 @@ Sort: BUY first (shallowest dip = strongest buy), then WAIT (deepest dip first).
 from datetime import datetime, timedelta
 from pytz import timezone
 import os
-from config import OUTPUT_DIR, OUTPUT_FILE, PERCENTILE_TARGET, EUR_DISPLAY_TICKERS, MIN_ACTIONABLE_RALLY_PCT, RALLY_CONVICTION_PERCENTILE
+from config import OUTPUT_DIR, OUTPUT_FILE, PERCENTILE_TARGET
 
 
 def get_currency_symbol(ticker, portfolio_data=None):
-    """Return € for European stocks and EUR-display ADRs, £ for UK stocks, $ otherwise.
-    EUR_DISPLAY_TICKERS (e.g. ASML) are USD-traded but display in EUR — driven by config.yaml.
-    """
-    if ticker.endswith('.MI') or ticker in EUR_DISPLAY_TICKERS:
+    """Return € for European stocks and ASML (displayed in EUR), £ for UK, $ otherwise."""
+    if ticker.endswith('.MI') or ticker == 'ASML':  # Session 3: ASML displays in EUR
         return '€'
     elif ticker.endswith('.L'):
         return '£'
@@ -138,8 +136,8 @@ def generate_html(execution_data, macro_regime, vix, portfolio_data,
         if data.get('_anchor_suppressed'):
             stock_warn += '<span class="stock-warn" title="Post-earnings: anchor suppressed">🔇</span>'
 
-        # Display price: EUR for EUR_DISPLAY_TICKERS (USD ADRs converted to EUR)
-        if ticker in EUR_DISPLAY_TICKERS and p_data.get('_price_eur'):
+        # Session 3: Display price (EUR for ASML, native currency for others)
+        if ticker == 'ASML' and p_data.get('_price_eur'):
             display_price = p_data['_price_eur']
         else:
             display_price = data['current_price']
@@ -156,15 +154,22 @@ def generate_html(execution_data, macro_regime, vix, portfolio_data,
         else:
             target_display = f"⬇️ {ccy}{data['target_price']:.2f} · {data['date_range']} ({dip_display})"
 
-        # Rally line: config-driven conviction % and display threshold
+        # Session 5: Rally line (⬆️ expected rally target, 60% conviction)
         rally_display = ""
         rally_price = data.get('rally_price')
         rally_pct = data.get('rally_pct', 0)
         rally_date_range = data.get('rally_date_range', '')
-        if rally_price and rally_pct > MIN_ACTIONABLE_RALLY_PCT:
-            rally_display = f"⬆️ {ccy}{rally_price:.2f} · {rally_date_range} (+{rally_pct*100:.1f}% rally, {RALLY_CONVICTION_PERCENTILE}% conviction)"
+        if rally_price and rally_pct > 0.01:  # Only show if >1% rally expected
+            rally_display = f"⬆️ {ccy}{rally_price:.2f} · {rally_date_range} (+{rally_pct*100:.1f}% rally, 60% conviction)"
 
-        # Session 5: AI catalyst badge (only on triggered stocks)
+        # 🔮 Analyst consensus line
+        consensus_display = ""
+        ac = data.get('analyst_consensus')
+        if ac and ac.get('median'):
+            upside = ac['upside_pct']
+            upside_str = f"+{upside:.1f}%" if upside >= 0 else f"{upside:.1f}%"
+            trend_str = f"; Trend: {ac['trend']}" if ac.get('trend') else ""
+            consensus_display = f"🔮 Analyst consensus (12-mo): {ccy}{ac['median']:.2f} median ({upside_str}){trend_str}"
         ai_badge = ""
         ai_result = p_data.get('ai_result', {})
         if isinstance(ai_result, dict) and ai_result.get('narrative'):
@@ -218,6 +223,7 @@ def generate_html(execution_data, macro_regime, vix, portfolio_data,
                 <div class="oneliner">{data['one_liner']}</div>
                 {fallback_html}
                 {ai_badge}
+                <div class="consensus-row">{consensus_display}</div>
             </td>
             <td class="earnings">{earnings_display}</td>
         </tr>
@@ -324,6 +330,7 @@ def generate_html(execution_data, macro_regime, vix, portfolio_data,
         .price-row {{ color: #e8eaed; margin-bottom: 6px; }}
         .target-row {{ color: #ffa726; margin-bottom: 6px; font-weight: 500; }}
         .confidence-row {{ color: #a0a5b0; font-size: 0.9em; margin-bottom: 8px; }}
+        .consensus-row {{ color: #b0b5c0; font-size: 0.85em; margin-top: 6px; font-style: italic; }}
         .oneliner {{
             background: #2d3548; padding: 10px; border-radius: 6px;
             font-size: 0.9em; color: #b0b5c0; font-style: italic; margin-top: 8px;
