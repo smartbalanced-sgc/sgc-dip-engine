@@ -26,7 +26,7 @@ import numpy as np
 import pandas as pd
 from datetime import datetime, timedelta
 from config import (
-    PORTFOLIO, YFINANCE_TICKERS,
+    PORTFOLIO, YFINANCE_TICKERS, EUR_DISPLAY_TICKERS,
     FMP_API_KEY, FMP_BASE_URL, API_DELAY, API_TIMEOUT,
     LOOKBACK_DAYS, ANALYST_GRADE_MAX_AGE
 )
@@ -329,16 +329,23 @@ def fetch_vix():
 # =============================================================
 
 def eulerpool_get(endpoint, ticker):
-    """Eulerpool API call for LDO.MI enrichment fields"""
+    """
+    Eulerpool API call for LDO.MI enrichment fields.
+    
+    FIXED (Session 6):
+    - URL uses /api/1/ version prefix (was missing, caused 404)
+    - Token passed as query param ?token= (was Bearer header, caused 401)
+    Both issues caused silent failures — profile returned {} → price_is_fresh=False
+    """
     if not EULERPOOL_TOKEN:
         return None
     
-    url = f"https://api.eulerpool.com/api/{endpoint}"
-    headers = {"Authorization": f"Bearer {EULERPOOL_TOKEN}"}
+    url = f"https://api.eulerpool.com/api/1/{endpoint}"
+    params = {"token": EULERPOOL_TOKEN}
     time.sleep(0.5)
     
     try:
-        resp = requests.get(url, headers=headers, timeout=10)
+        resp = requests.get(url, params=params, timeout=10)
         if resp.status_code == 200:
             return resp.json()
         else:
@@ -587,12 +594,14 @@ def fetch_stock_data_fmp(ticker):
     hist = fetch_historical_fmp(ticker)
     price, quote_data = fetch_current_price_fmp(ticker, hist)
 
-    # Session 3: ASML EUR conversion
+    # Session 4/6: EUR conversion for USD-traded ADRs that display in EUR
+    # Driven by config.yaml data.eur_display_tickers (e.g. ASML)
+    # FMP returns USD price for these tickers; we convert before Monte Carlo
     price_usd = price
     price_eur = None
     fx_rate = None
     
-    if ticker == 'ASML' and price:
+    if ticker in EUR_DISPLAY_TICKERS and price:
         fx_rate = fetch_fx_rate('EUR', 'USD')
         price_eur = price_usd / fx_rate
         print(f"   💱 {ticker}: ${price_usd:.2f} → €{price_eur:.2f} (EUR/USD {fx_rate:.4f})")
@@ -604,8 +613,8 @@ def fetch_stock_data_fmp(ticker):
                     hist[col] = hist[col] / fx_rate
             print(f"   ✅ {ticker}: Historical OHLC converted to EUR")
     
-    # CRITICAL FIX: Use EUR as current_price for ASML (Monte Carlo must run on EUR)
-    current_price = price_eur if (ticker == 'ASML' and price_eur) else price
+    # CRITICAL: Use EUR as current_price for EUR display tickers
+    current_price = price_eur if (ticker in EUR_DISPLAY_TICKERS and price_eur) else price
 
     return {
         'ticker': ticker,
@@ -626,10 +635,10 @@ def fetch_stock_data_fmp(ticker):
         'grades_consensus': fetch_grades_consensus_fmp(ticker),
         'dcf_value': fetch_dcf_fmp(ticker),
         'insider_stats': fetch_insider_stats_fmp(ticker),
-        # Session 3: EUR conversion metadata
-        '_price_usd': price_usd if ticker == 'ASML' else None,
-        '_price_eur': price_eur if ticker == 'ASML' else None,
-        '_fx_rate': fx_rate if ticker == 'ASML' else None
+        # EUR conversion metadata (for downstream display + analyst target conversion)
+        '_price_usd': price_usd if ticker in EUR_DISPLAY_TICKERS else None,
+        '_price_eur': price_eur if ticker in EUR_DISPLAY_TICKERS else None,
+        '_fx_rate': fx_rate if ticker in EUR_DISPLAY_TICKERS else None
     }
 
 
@@ -733,17 +742,17 @@ def fetch_portfolio_data():
             # US stocks: FMP (with ASML EUR conversion)
             portfolio_data[ticker] = fetch_stock_data_fmp(ticker)
     
-    # Convert ASML analyst targets to EUR if available
-    if 'ASML' in portfolio_data and portfolio_data['ASML']:
-        asml = portfolio_data['ASML']
-        if asml.get('_price_eur') and asml.get('price_targets'):
-            fx_rate = asml['_fx_rate']
-            targets = asml['price_targets']
-            # CRITICAL: Replace USD targets with EUR (don't create separate keys)
-            for key in ['targetMean', 'targetHigh', 'targetLow', 'targetMedian']:
-                if targets.get(key):
-                    targets[key] = targets[key] / fx_rate  # Convert in-place
-            print(f"   ✅ ASML: Analyst targets converted to EUR")
+    # Convert analyst targets to EUR for EUR display tickers (e.g. ASML)
+    for eur_ticker in EUR_DISPLAY_TICKERS:
+        if eur_ticker in portfolio_data and portfolio_data[eur_ticker]:
+            stock = portfolio_data[eur_ticker]
+            if stock.get('_price_eur') and stock.get('price_targets'):
+                fx = stock['_fx_rate']
+                targets = stock['price_targets']
+                for key in ['targetMean', 'targetHigh', 'targetLow', 'targetMedian']:
+                    if targets.get(key):
+                        targets[key] = targets[key] / fx
+                print(f"   ✅ {eur_ticker}: Analyst targets converted to EUR")
 
     ok = sum(1 for d in portfolio_data.values() if d and d.get('current_price') is not None)
     print(f"\n   Data fetched: {ok}/{len(PORTFOLIO)} stocks with price data")
