@@ -310,7 +310,7 @@ schedule:
   # When to run (cron format)
   # Default: Mon-Fri at 8:30 PM UTC (9:30 PM BST during summer)
   # Format: "minute hour day month weekday"
-  cron: "30 20 * * 1-5"
+  cron: "30 19 * * 1-5" # 7:30 PM UTC = 8:30 PM BST (Mon-Fri)
   
   # Timezone for display/logging
   timezone: "Europe/London"
