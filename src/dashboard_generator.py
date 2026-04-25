@@ -194,7 +194,7 @@ def generate_html(execution_data, macro_regime, vix, portfolio_data,
             rsi_display = f'<span class="rsi {rsi_class}">RSI {rsi_val:.0f}</span>'
 
         # Conviction display (fixed at PERCENTILE_TARGET%)
-        conviction_display = f"Conviction: {PERCENTILE_TARGET}%"
+        conviction_display = f" Dip conviction: {PERCENTILE_TARGET}%"
 
         # Session 3: Fallback signal rendering
         fallback_html = ""
