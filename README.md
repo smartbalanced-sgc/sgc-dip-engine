@@ -400,6 +400,6 @@ Not financial advice. This system is a personal tool for entry timing optimisati
 
 ---
 
-**Version:** 7.0  
+**Version:** 1.0  
 **Last Updated:** April 25, 2026  
 **Dashboard:** https://smartbalanced-sgc.github.io/sgc-dip-engine/
