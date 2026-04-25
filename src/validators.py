@@ -7,7 +7,7 @@ reaching the dashboard. Each gate validates at a pipeline stage.
 Design principles:
   - NEVER clamp data and pretend it's real. Flag or degrade instead.
   - NaN is the silent killer. Check at every gate.
-  - Log every warning so investor can see what the model distrusts.
+  - Log every warning so Jesse can see what the model distrusts.
   - Warnings use plain "caveman" language: what happened, why, what we did.
 
 Gate 1: Input data quality (after fetch, before models)
@@ -100,7 +100,8 @@ def validate_input_data(portfolio_data):
                 continue
         
         # Warn if moderately stale (>5 days but ≤10 days)
-        if days_stale > HIST_MAX_STALE_DAYS:
+        # Skip if price_is_fresh — fresh warning already fired above, this would be redundant
+        if days_stale > HIST_MAX_STALE_DAYS and not data.get('_price_is_fresh'):
             warnings.append(f"{ticker}: Data {days_stale} days old (last: {last_date}). Signal may lag recent moves.")
 
         # --- NaN check in historical ---
@@ -130,16 +131,21 @@ def validate_input_data(portfolio_data):
                 has_power_sector_outliers = True
 
         # --- Price cross-check: quote vs last historical close ---
+        # Skip when price is fresh from profile endpoint — the gap reflects real price
+        # movement since stale candles, not data corruption
         last_close = float(hist['Close'].iloc[-1])
-        if last_close > 0:
+        if last_close > 0 and not data.get('_price_is_fresh'):
             divergence = abs(price - last_close) / last_close
             if divergence > PRICE_CROSSCHECK_MAX_PCT:
                 warnings.append(f"{ticker}: Quote ${price:.2f} vs last close ${last_close:.2f} ({divergence*100:.1f}% gap). Possible stale data.")
 
         # --- Volume check ---
-        mean_vol = hist['Volume'].mean()
-        if mean_vol < VOLUME_MIN_DAILY:
-            warnings.append(f"{ticker}: Low volume ({mean_vol:,.0f}/day vs {VOLUME_MIN_DAILY:,} min). Prices may be less reliable.")
+        # Skip when _no_volume is True — Eulerpool candles don't include volume data
+        # Volume=0 is expected for these stocks, not a data quality issue
+        if not data.get('_no_volume'):
+            mean_vol = hist['Volume'].mean()
+            if mean_vol < VOLUME_MIN_DAILY:
+                warnings.append(f"{ticker}: Low volume ({mean_vol:,.0f}/day vs {VOLUME_MIN_DAILY:,} min). Prices may be less reliable.")
 
         # --- Analyst target bounds ---
         targets = data.get('price_targets', {})
