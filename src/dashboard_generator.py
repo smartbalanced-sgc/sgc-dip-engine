@@ -362,7 +362,7 @@ def generate_html(execution_data, macro_regime, vix, portfolio_data,
             <thead>
                 <tr>
                     <th>Stock</th>
-                    <th>Signal & Target (from today + 60 days) </th>
+                    <th>Signal & Target (today + 60 days)</th>
                     <th>Earnings</th>
                 </tr>
             </thead>
