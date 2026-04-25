@@ -230,6 +230,31 @@ def process_execution_signals(simulation_results, portfolio_data=None, macro_eve
             macro_events=macro_events
         )
 
+        # 🔮 Analyst consensus line
+        # Use targetMedian (robust to outliers) with trend from price-target-summary
+        price_targets = stock_data.get('price_targets', {}) or {}
+        target_trend = stock_data.get('target_trend', {}) or {}
+        analyst_median = price_targets.get('targetMedian')
+        analyst_consensus = None
+        if analyst_median and current > 0:
+            upside_pct = (analyst_median / current - 1) * 100
+            last_month = target_trend.get('lastMonthAvg')
+            last_quarter = target_trend.get('lastQuarterAvg')
+            if last_month and last_quarter:
+                if last_month > last_quarter * 1.01:
+                    trend = '↑ rising'
+                elif last_month < last_quarter * 0.99:
+                    trend = '↓ falling'
+                else:
+                    trend = '→ stable'
+            else:
+                trend = None
+            analyst_consensus = {
+                'median': analyst_median,
+                'upside_pct': upside_pct,
+                'trend': trend,
+            }
+
         execution_data[ticker] = {
             'signal': signal,
             'current_price': current,
@@ -243,12 +268,14 @@ def process_execution_signals(simulation_results, portfolio_data=None, macro_eve
             '_no_dip': result.get('_no_dip', False),
             '_anchor_suppressed': anchor_suppressed,
             '_suppress_reason': suppress_reason,
-            'fallback': fallback,  # Session 3: NEW FIELD
+            'fallback': fallback,
             # Session 5: Rally stats
             'rally_price': result.get('rally_60'),
             'rally_pct': (result.get('rally_60', current) / current - 1) if current > 0 else 0,
             'rally_date_range': rally_date_range,
             'terminal_median': result.get('terminal_median'),
+            # Session 8: Analyst consensus
+            'analyst_consensus': analyst_consensus,
         }
 
     return execution_data
