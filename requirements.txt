@@ -6,3 +6,4 @@ scipy==1.11.2
 anthropic
 lxml==5.1.0
 pyyaml>=6.0
+pytz>=2024.1
