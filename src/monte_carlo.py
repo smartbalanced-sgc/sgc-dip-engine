@@ -29,7 +29,7 @@ CONVICTION MODEL:
 import numpy as np
 import pandas as pd
 from datetime import datetime
-from config import NUM_PATHS, SIMULATION_DAYS, PERCENTILE_TARGET
+from config import NUM_PATHS, SIMULATION_DAYS, PERCENTILE_TARGET, RALLY_CONVICTION_PERCENTILE
 from correlation import generate_correlated_random_numbers
 
 
@@ -289,16 +289,22 @@ def extract_statistics(paths, current_price):
     valid_hits = fallback_hits[fallback_hits > 0]
     fallback_date_index = int(np.median(valid_hits)) if len(valid_hits) > 0 else median_date_index
     
-    # --- Rally statistics (Session 5) ---
-    # 40th percentile of maximums = 60% of paths reach this high or higher
+    # --- Rally statistics (Session 5, config-driven in Session 6) ---
+    # rally_conviction_percentile from config.yaml (default 60)
+    # 60% conviction = 40th percentile of maximums (60% of paths reach this high or higher)
+    # Formula: percentile_input = 100 - rally_conviction_percentile
     maximums = paths.max(axis=1)
     max_dates = np.argmax(paths, axis=1)
     
-    rally_60 = np.percentile(maximums, 40)  # 60% conviction rally
-    rally_70 = np.percentile(maximums, 30)  # 70% conviction rally (conservative)
+    rally_pct_input = 100 - RALLY_CONVICTION_PERCENTILE
+    rally_target = np.percentile(maximums, rally_pct_input)
+    
+    # Conservative rally (rally_conviction_percentile + 10 for conservative view)
+    rally_conservative_pct_input = max(0, 100 - (RALLY_CONVICTION_PERCENTILE + 10))
+    rally_conservative = np.percentile(maximums, rally_conservative_pct_input)
     
     # Rally timing: median day when paths first hit rally target
-    rally_hits = np.argmax(paths >= rally_60, axis=1)
+    rally_hits = np.argmax(paths >= rally_target, axis=1)
     valid_rally_hits = rally_hits[rally_hits > 0]
     rally_date_index = int(np.median(valid_rally_hits)) if len(valid_rally_hits) > 0 else int(np.median(max_dates))
     
@@ -313,9 +319,9 @@ def extract_statistics(paths, current_price):
         'fallback_low': fallback_low,
         'fallback_confidence': fallback_confidence,
         'fallback_date_index': fallback_date_index,
-        # Rally stats (Session 5)
-        'rally_60': rally_60,
-        'rally_70': rally_70,
+        # Rally stats (Session 5, config-driven Session 6)
+        'rally_60': rally_target,           # Primary rally target (conviction from config)
+        'rally_70': rally_conservative,     # Conservative rally target
         'rally_date_index': rally_date_index,
         'terminal_median': terminal_median
     }
