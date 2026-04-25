@@ -87,10 +87,17 @@ def validate_input_data(portfolio_data):
         
         # Session 3 Fix: SKIP if data extremely stale (>10 days)
         # Trading on 2+ week old prices is unreliable
+        # Session 4 Fix: BYPASS staleness skip if current price is fresh (from profile endpoint)
+        # Candles may be stale but profile mcap/shares gives TODAY's price
         if days_stale > 10:
-            warnings.append(f"{ticker}: Data {days_stale} days old (last: {last_date}) — TOO STALE, SKIPPED")
-            data['_skip'] = True
-            continue
+            if data.get('_price_is_fresh'):
+                warnings.append(f"{ticker}: Candle data {days_stale} days old (last: {last_date}) but current price is FRESH from profile. Proceeding with caution.")
+                # Don't skip — we have a valid current price even though candles are stale
+                # GARCH will use older candle data (less precise but functional)
+            else:
+                warnings.append(f"{ticker}: Data {days_stale} days old (last: {last_date}) — TOO STALE, SKIPPED")
+                data['_skip'] = True
+                continue
         
         # Warn if moderately stale (>5 days but ≤10 days)
         if days_stale > HIST_MAX_STALE_DAYS:
