@@ -65,14 +65,30 @@ def compute_enrichment_modifiers(stock_data):
         drift_mods['rsi'] = 0.0
 
     # --- Sentiment modifier ---
-    # Claude score -5 to +5 → drift modifier
-    # Scale: score / 100 → +5: +0.05, -5: -0.05
-    sentiment = stock_data.get('sentiment')
-    if sentiment and isinstance(sentiment, dict):
-        score = sentiment.get('sentiment_score', 0.0)
-        drift_mods['sentiment'] = score / 100.0
-    else:
-        drift_mods['sentiment'] = 0.0
+    # Session 5: Sentiment no longer modifies drift (negligible impact ±0.82%)
+    # AI now modifies vol_regime instead (see below)
+    # Drift slot kept at 0 for backwards compatibility
+    drift_mods['sentiment'] = 0.0
+
+    # --- AI vol_regime modifier (Session 5) ---
+    # Post-earnings AI output: HIGH/MEDIUM/LOW → vol multiplier
+    # This ACTUALLY changes dip depth (5-15%) unlike drift adjustment
+    ai_result = stock_data.get('ai_result', {})
+    if isinstance(ai_result, dict):
+        ai_vol_regime = ai_result.get('vol_regime', '').upper()
+        if ai_vol_regime == 'LOW':
+            vol_mult *= 0.75  # Post-earnings beat: vol collapses, shallower dips
+        elif ai_vol_regime == 'HIGH':
+            vol_mult *= 1.30  # Post-earnings miss: vol elevated, deeper dips
+        # MEDIUM = no change (default)
+
+    # --- Analyst spread → uncertainty proxy (Session 5, free) ---
+    # Wide analyst disagreement = high uncertainty = wider distribution
+    from sentiment import compute_analyst_spread
+    price_targets = stock_data.get('price_targets', {})
+    analyst_spread = compute_analyst_spread(price_targets)
+    if analyst_spread is not None and analyst_spread > 0.30:
+        vol_mult *= 1.10  # High disagreement: widen distribution
 
     # --- Momentum modifier (contrarian) ---
     # Strong positive 1M momentum → mild drag (what rips tends to pull back)
@@ -246,10 +262,11 @@ def run_monte_carlo_stock(
 
 def extract_statistics(paths, current_price):
     """
-    Extract primary and fallback dip targets from MC paths.
+    Extract primary and fallback dip targets + rally targets from MC paths.
     
-    Primary: 60th percentile (current behavior) — deeper dip, moderate conviction
+    Primary: PERCENTILE_TARGET percentile (deeper dip, moderate conviction)
     Fallback: 80th percentile — shallower dip, higher conviction
+    Rally: 40th percentile of maximums (60% conviction rally target)
     """
     from config import PERCENTILE_TARGET
     from config_loader import get_config
@@ -257,7 +274,7 @@ def extract_statistics(paths, current_price):
     minimums = paths.min(axis=1)
     min_dates = np.argmin(paths, axis=1)
     
-    # Primary target (60th percentile)
+    # Primary target (PERCENTILE_TARGET percentile)
     percentile_low = np.percentile(minimums, PERCENTILE_TARGET)
     confidence = float(np.mean(minimums <= percentile_low))
     median_date_index = int(np.median(min_dates))
@@ -268,11 +285,26 @@ def extract_statistics(paths, current_price):
     fallback_confidence = float(np.mean(minimums <= fallback_low))
     
     # Fallback timing: median day when paths hit fallback price
-    # Find first day each path drops below fallback
     fallback_hits = np.argmax(paths <= fallback_low, axis=1)
-    # Filter out paths that never hit fallback (value=0 from argmax of all False)
     valid_hits = fallback_hits[fallback_hits > 0]
     fallback_date_index = int(np.median(valid_hits)) if len(valid_hits) > 0 else median_date_index
+    
+    # --- Rally statistics (Session 5) ---
+    # 40th percentile of maximums = 60% of paths reach this high or higher
+    maximums = paths.max(axis=1)
+    max_dates = np.argmax(paths, axis=1)
+    
+    rally_60 = np.percentile(maximums, 40)  # 60% conviction rally
+    rally_70 = np.percentile(maximums, 30)  # 70% conviction rally (conservative)
+    
+    # Rally timing: median day when paths first hit rally target
+    rally_hits = np.argmax(paths >= rally_60, axis=1)
+    valid_rally_hits = rally_hits[rally_hits > 0]
+    rally_date_index = int(np.median(valid_rally_hits)) if len(valid_rally_hits) > 0 else int(np.median(max_dates))
+    
+    # Terminal price (where stock ends at Day 60)
+    terminal_prices = paths[:, -1]
+    terminal_median = float(np.median(terminal_prices))
     
     return {
         'percentile_low': percentile_low,
@@ -280,7 +312,12 @@ def extract_statistics(paths, current_price):
         'median_date_index': median_date_index,
         'fallback_low': fallback_low,
         'fallback_confidence': fallback_confidence,
-        'fallback_date_index': fallback_date_index
+        'fallback_date_index': fallback_date_index,
+        # Rally stats (Session 5)
+        'rally_60': rally_60,
+        'rally_70': rally_70,
+        'rally_date_index': rally_date_index,
+        'terminal_median': terminal_median
     }
 
 
@@ -381,6 +418,11 @@ def simulate_portfolio(portfolio_data, corr_matrix, ticker_order, regime_info, m
             'fallback_low': stats['fallback_low'],
             'fallback_confidence': stats['fallback_confidence'],
             'fallback_date_index': stats['fallback_date_index'],
+            # Rally stats (Session 5)
+            'rally_60': stats['rally_60'],
+            'rally_70': stats['rally_70'],
+            'rally_date_index': stats['rally_date_index'],
+            'terminal_median': stats['terminal_median'],
             'paths': paths
         }
 
