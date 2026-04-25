@@ -54,7 +54,7 @@ signal:
   # 60 = show dip that 60% of paths reach (moderate conviction, deeper dip)
   # Higher = shallower dips (more certain), Lower = deeper dips (less certain)
   # Range: 50-80 recommended, 60 is balanced
-  percentile_target: 50    # 60 means "wait for a dip that 60% of paths reach." But if RSI + earnings volatility bias paths downward, the 60th percentile dip might be too deep to ever occur. Updated to 50%.
+  percentile_target: 70    # 60 means "wait for a dip that 60% of paths reach." But if RSI + earnings volatility bias paths downward, the 60th percentile dip might be too deep to ever occur. Updated to 50%.
   
   # FALLBACK TARGET: High-conviction alternative when primary is WAIT
   # 80 = show dip that 80% of paths reach (high conviction, shallower dip)
