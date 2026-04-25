@@ -12,6 +12,7 @@ Sort: BUY first (shallowest dip = strongest buy), then WAIT (deepest dip first).
 """
 
 from datetime import datetime, timedelta
+from pytz import timezone
 import os
 from config import OUTPUT_DIR, OUTPUT_FILE, PERCENTILE_TARGET
 
@@ -31,8 +32,12 @@ def generate_html(execution_data, macro_regime, vix, portfolio_data,
     if warnings is None:
         warnings = []
 
-    run_time = datetime.now().strftime("%b %d, %Y %I:%M %p BST")
-    end_date = (datetime.now() + timedelta(days=60)).strftime("%b %d, %Y")
+    # Get current time in London timezone (BST/GMT)
+    london_tz = timezone('Europe/London')
+    now_london = datetime.now(london_tz)
+    
+    run_time = now_london.strftime("%b %d, %Y %I:%M %p %Z")  # %Z shows BST or GMT
+    end_date = (now_london + timedelta(days=60)).strftime("%b %d, %Y")
 
     buy_tickers = [t for t, d in execution_data.items() if d['signal'] == 'BUY']
     wait_tickers = [t for t, d in execution_data.items() if d['signal'] == 'WAIT']
@@ -342,7 +347,7 @@ def generate_html(execution_data, macro_regime, vix, portfolio_data,
         {backtest_html}
 
         <div class="deployment">
-            <h2>TODAY'S DEPLOYMENT ({datetime.now().strftime("%b %d")})</h2>
+            <h2>TODAY'S DEPLOYMENT ({now_london.strftime("%b %d")})</h2>
             <div class="deployment-row">
                 <strong>BUY TODAY ({len(buy_tickers)}):</strong>
                 <span class="buy-list">{', '.join(buy_tickers) if buy_tickers else 'None'}</span>
@@ -357,7 +362,7 @@ def generate_html(execution_data, macro_regime, vix, portfolio_data,
             <thead>
                 <tr>
                     <th>Stock</th>
-                    <th>Signal & Target</th>
+                    <th>Signal & Target (from today + 60 days) </th>
                     <th>Earnings</th>
                 </tr>
             </thead>
