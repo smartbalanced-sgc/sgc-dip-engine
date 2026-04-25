@@ -26,7 +26,7 @@ from hmm_regime import detect_regime_simple, get_regime_adjustments
 from macro_regime import fetch_macro_indicators, classify_macro_regime, get_macro_adjustments
 from correlation import build_correlation_matrix
 from monte_carlo import simulate_portfolio
-from sentiment import analyze_stock_sentiment
+from sentiment import detect_catalysts, run_ai_intelligence, prioritize_buy_signals
 from execution_logic import process_execution_signals
 from dashboard_generator import generate_html, save_html
 from signal_archiver import archive_signals
@@ -125,40 +125,33 @@ def main():
             all_warnings.extend(anchor_warnings)
 
     # =========================================================
-    # STEP 3: Analyze sentiment (BEFORE MC — Phase 2)
-    # Session 3: Web search enrichment + cost tracking
-    # Scores are attached to portfolio_data so MC can use them.
+    # STEP 3: AI Intelligence (Session 5 — Trigger-Based)
+    # Layer 0: Free structural enrichment (handled in monte_carlo.py)
+    # Layer 1: Catalyst triggers (targeted AI, no web search)
+    # Layer 2: Emergency web search (3-sigma only, ~2-3×/month)
     # =========================================================
-    print("\n🤖 STEP 3: Analyzing sentiment (Claude API with web search)...")
+    print("\n🤖 STEP 3: Detecting catalysts for AI intelligence...")
     modelable_data = {t: d for t, d in valid_stocks.items() if t not in unmodelable}
     try:
-        total_sentiment_cost = 0.0
-        for ticker, data in modelable_data.items():
-            # Session 3: Extract company name and sector from profile
-            profile = data.get('profile', {}) or {}
-            company_name = profile.get('companyName', ticker)
-            sector = profile.get('sector', 'Unknown')
-            
-            sentiment = analyze_stock_sentiment(
-                ticker,
-                data['current_price'],
-                data['earnings_date'],
-                data['analyst_grade'],
-                company_name=company_name,
-                sector=sector
-            )
-            
-            # Attach to portfolio_data so MC can read it
-            portfolio_data[ticker]['sentiment'] = sentiment
-            total_sentiment_cost += sentiment.get('cost', 0.0)
-            
-            print(f"   {ticker}: {sentiment['sentiment_score']:+.1f} - {sentiment['narrative'][:60]}")
+        # Detect which stocks have catalysts today
+        catalysts = detect_catalysts(portfolio_data)
         
-        # Session 3: Display total sentiment cost
-        print(f"   Total sentiment cost: £{total_sentiment_cost * 0.85:.2f}")  # Rough USD to GBP
+        if catalysts:
+            trigger_summary = {t: c['trigger'] for t, c in catalysts.items()}
+            for ticker, trigger in trigger_summary.items():
+                print(f"   ⚡ {ticker}: {trigger}")
+            
+            # Run targeted AI on catalyst stocks only
+            ai_results = run_ai_intelligence(portfolio_data, catalysts)
+            
+            # Attach AI results to portfolio_data for Monte Carlo consumption
+            for ticker, result in ai_results.items():
+                portfolio_data[ticker]['ai_result'] = result
+        else:
+            print("   ✅ No catalysts detected — AI skipped (£0 cost)")
         
     except Exception as e:
-        print(f"   ⚠️  Sentiment analysis skipped: {e}")
+        print(f"   ⚠️  AI intelligence skipped: {e}")
 
     # =========================================================
     # STEP 4: Build correlation matrix
@@ -205,6 +198,19 @@ def main():
         print(f"   {ticker}: {data['signal']} - {data['one_liner']}")
         if data.get('_anchor_suppressed'):
             print(f"      🔇 {data['_suppress_reason']}")
+
+    # Session 5: BUY signal prioritization (Trigger D)
+    buy_tickers = [t for t, d in execution_data.items() if d['signal'] == 'BUY']
+    if len(buy_tickers) >= 2:
+        print(f"\n   🎯 Prioritizing {len(buy_tickers)} BUY signals...")
+        try:
+            ranked, rationale, priority_cost = prioritize_buy_signals(buy_tickers, portfolio_data, None)
+            for i, ticker in enumerate(ranked):
+                execution_data[ticker]['_priority_rank'] = i + 1
+                execution_data[ticker]['_priority_reason'] = rationale.get(ticker, '')
+                print(f"      #{i+1} {ticker}: {rationale.get(ticker, '')[:60]}")
+        except Exception as e:
+            print(f"      ⚠️  Prioritization skipped: {e}")
 
     # ----- GATE 4: Portfolio-level signal validation -----
     print("\n🔒 GATE 4: Validating portfolio signals...")
