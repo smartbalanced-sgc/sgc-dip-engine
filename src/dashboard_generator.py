@@ -177,10 +177,10 @@ def generate_html(execution_data, macro_regime, vix, portfolio_data,
             thesis = ai_result.get('thesis_status', '')
             if vol_regime:
                 regime_icon = '🟢' if vol_regime == 'LOW' else '🔴' if vol_regime == 'HIGH' else '🟡'
-                ai_badge = f'<div style="font-size: 12px; color: #aaa; margin-top: 4px;">⚡ AI: Vol {vol_regime} {regime_icon} — {ai_result["narrative"][:60]}</div>'
+                ai_badge = f'<div style="font-size: 12px; color: #aaa; margin-top: 4px;">✨ AI: Vol {vol_regime} {regime_icon} — {ai_result["narrative"][:60]}</div>'
             elif thesis:
                 thesis_icon = '🟢' if thesis == 'INTACT' else '🔴' if thesis == 'CRITICAL' else '🟡'
-                ai_badge = f'<div style="font-size: 12px; color: #aaa; margin-top: 4px;">⚡ AI: Thesis {thesis} {thesis_icon} — {ai_result["narrative"][:60]}</div>'
+                ai_badge = f'<div style="font-size: 12px; color: #aaa; margin-top: 4px;">✨ AI: Thesis {thesis} {thesis_icon} — {ai_result["narrative"][:60]}</div>'
 
         # RSI badge
         rsi_val = p_data.get('rsi')
