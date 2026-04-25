@@ -47,6 +47,14 @@ for ticker in tickers:
 
 YFINANCE_TICKERS = set(get_config('data', 'yfinance_tickers', default=[]))
 
+# EUR display tickers: USD-traded ADRs that should display in EUR (e.g. ASML)
+# Controlled from config.yaml data.eur_display_tickers
+EUR_DISPLAY_TICKERS = set(get_config('data', 'eur_display_tickers', default=[]))
+
+# Power sector tickers: stocks with binary catalysts (PPA wins, restarts)
+# Used to generate context note when >20% moves detected — no stock names in warning
+POWER_SECTOR_TICKERS = set(get_config('data', 'power_sector_tickers', default=[]))
+
 # =============================================================
 # SIMULATION PARAMETERS
 # =============================================================
@@ -58,6 +66,10 @@ PERCENTILE_TARGET = get_config('signal', 'percentile_target')
 # SIGNAL THRESHOLDS
 # =============================================================
 MIN_ACTIONABLE_DIP_PCT = get_config('signal', 'min_actionable_dip_pct')
+
+# Rally targets: conviction % and display threshold (from config.yaml)
+RALLY_CONVICTION_PERCENTILE = get_config('signal', 'rally_conviction_percentile', default=60)
+MIN_ACTIONABLE_RALLY_PCT = get_config('signal', 'min_actionable_rally_pct', default=0.01)
 
 # =============================================================
 # DATA QUALITY THRESHOLDS (Guardrails — Gate 1)
