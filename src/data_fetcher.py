@@ -1,19 +1,21 @@
 """
-Data Fetcher — SGC Dip Engine v7 (Session 3 Production + Current Price Fix)
+Data Fetcher — SGC Dip Engine v7 (Session 4 CRITICAL FIXES)
 - FMP API for 13 US stocks (15 endpoints per stock + 2 macro)
 - Eulerpool API for LDO.MI (complete primary source — all 14/16 fields)
-- ASML EUR conversion for display (user buys on Trading212 in EUR)
+- ASML EUR conversion BEFORE Monte Carlo (NOT just display)
+- LDO.MI current price from profile (NOT stale candles)
 
 FMP stable API pattern: symbol in query params, NOT path
 Endpoint: historical-price-eod/full (NOT historical-price-full)
 Ref: rationale.md §2.1, §2.2, §3.1-§3.6
 
-Session 3 Production + LDO.MI Current Price Fix:
+Session 4 CRITICAL FIXES:
+- ASML: Current price, historical OHLC, analyst targets ALL converted to EUR BEFORE Monte Carlo
+- ASML: Monte Carlo runs on EUR-native data (fixes inverted rally/dip bug)
 - LDO.MI: Current price from /equity/profile (mcap/shares) — ALWAYS FRESH
-- LDO.MI: Fallback to candles only if profile unavailable
+- LDO.MI: Fallback to candles only if profile unavailable (fixes 18-day stale data skip)
 - Eulerpool complete: OHLC 230 days, beta, targets, estimates, grades, insider, AAQS
 - Corrected endpoint paths: /research/recommendations, /sentiment/price-metrics, /sentiment/insider-sentiment
-- ASML: Fetch USD ADR, convert to EUR for display (1:1 ratio)
 - FX rates: exchangerate-api.com (FMP doesn't support on Starter plan)
 - yfinance REMOVED (unreliable on GitHub Actions, Eulerpool provides all needed fields)
 """
@@ -594,11 +596,21 @@ def fetch_stock_data_fmp(ticker):
         fx_rate = fetch_fx_rate('EUR', 'USD')
         price_eur = price_usd / fx_rate
         print(f"   💱 {ticker}: ${price_usd:.2f} → €{price_eur:.2f} (EUR/USD {fx_rate:.4f})")
+        
+        # Convert historical OHLC to EUR (Monte Carlo must run on EUR data)
+        if hist is not None and not hist.empty:
+            for col in ['Open', 'High', 'Low', 'Close']:
+                if col in hist.columns:
+                    hist[col] = hist[col] / fx_rate
+            print(f"   ✅ {ticker}: Historical OHLC converted to EUR")
+    
+    # CRITICAL FIX: Use EUR as current_price for ASML (Monte Carlo must run on EUR)
+    current_price = price_eur if (ticker == 'ASML' and price_eur) else price
 
     return {
         'ticker': ticker,
         'historical': hist,
-        'current_price': price,
+        'current_price': current_price,
         'quote_data': quote_data,
         # Original endpoints
         'price_targets': fetch_price_targets_fmp(ticker),
@@ -724,9 +736,11 @@ def fetch_portfolio_data():
         if asml.get('_price_eur') and asml.get('price_targets'):
             fx_rate = asml['_fx_rate']
             targets = asml['price_targets']
+            # CRITICAL: Replace USD targets with EUR (don't create separate keys)
             for key in ['targetMean', 'targetHigh', 'targetLow', 'targetMedian']:
                 if targets.get(key):
-                    targets[f'{key}_eur'] = targets[key] / fx_rate
+                    targets[key] = targets[key] / fx_rate  # Convert in-place
+            print(f"   ✅ ASML: Analyst targets converted to EUR")
 
     ok = sum(1 for d in portfolio_data.values() if d and d.get('current_price') is not None)
     print(f"\n   Data fetched: {ok}/{len(PORTFOLIO)} stocks with price data")
