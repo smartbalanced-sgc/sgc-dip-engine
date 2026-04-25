@@ -1,5 +1,5 @@
 """
-Data Fetcher — SGC Dip Engine v7 (Session 3 Production)
+Data Fetcher — SGC Dip Engine v7 (Session 3 Production + Current Price Fix)
 - FMP API for 13 US stocks (15 endpoints per stock + 2 macro)
 - Eulerpool API for LDO.MI (complete primary source — all 14/16 fields)
 - ASML EUR conversion for display (user buys on Trading212 in EUR)
@@ -8,8 +8,10 @@ FMP stable API pattern: symbol in query params, NOT path
 Endpoint: historical-price-eod/full (NOT historical-price-full)
 Ref: rationale.md §2.1, §2.2, §3.1-§3.6
 
-Session 3 Production:
-- LDO.MI: Eulerpool complete (OHLC 230 days, beta, targets, estimates, grades, insider, AAQS)
+Session 3 Production + LDO.MI Current Price Fix:
+- LDO.MI: Current price from /equity/profile (mcap/shares) — ALWAYS FRESH
+- LDO.MI: Fallback to candles only if profile unavailable
+- Eulerpool complete: OHLC 230 days, beta, targets, estimates, grades, insider, AAQS
 - Corrected endpoint paths: /research/recommendations, /sentiment/price-metrics, /sentiment/insider-sentiment
 - ASML: Fetch USD ADR, convert to EUR for display (1:1 ratio)
 - FX rates: exchangerate-api.com (FMP doesn't support on Starter plan)
@@ -468,6 +470,15 @@ def fetch_stock_data_eulerpool(ticker):
         'companyName': profile_data.get('name')
     }
     
+    # NEW: Extract current price from profile (mcap / shares)
+    # This gives us TODAY's price, not stale candle price
+    current_price_from_profile = None
+    if isinstance(profile_data, dict):
+        mcap = profile_data.get('mcap')  # Market cap in millions EUR
+        shares = profile_data.get('shares')  # Outstanding shares in millions
+        if mcap and shares and shares > 0:
+            current_price_from_profile = mcap / shares  # EUR per share
+    
     # 5. GRADES CONSENSUS — /research/recommendations/ (CORRECTED: /research/, not /equity-extended/)
     recs_data = eulerpool_get(f"research/recommendations/{ticker}", ticker) or []
     grades_consensus = {}
@@ -516,7 +527,8 @@ def fetch_stock_data_eulerpool(ticker):
         'grades_consensus': grades_consensus,
         'target_trend': target_trend,
         'financial_scores': financial_scores,
-        'insider_stats': insider_stats
+        'insider_stats': insider_stats,
+        'current_price_from_profile': current_price_from_profile  # NEW: Current price from mcap/shares
     }
 
 
@@ -574,9 +586,6 @@ def fetch_stock_data_fmp(ticker):
     price, quote_data = fetch_current_price_fmp(ticker, hist)
 
     # Session 3: ASML EUR conversion
-    # ASML ticker is US-listed but reports in EUR
-    # We fetch in USD, convert to EUR, and use EUR as current_price
-    # This ensures Monte Carlo simulations and targets are EUR-native
     price_usd = price
     price_eur = None
     fx_rate = None
@@ -585,27 +594,14 @@ def fetch_stock_data_fmp(ticker):
         fx_rate = fetch_fx_rate('EUR', 'USD')
         price_eur = price_usd / fx_rate
         print(f"   💱 {ticker}: ${price_usd:.2f} → €{price_eur:.2f} (EUR/USD {fx_rate:.4f})")
-        
-        # Convert historical data to EUR (Session 3 Fix)
-        if hist is not None and not hist.empty:
-            for col in ['Open', 'High', 'Low', 'Close']:
-                if col in hist.columns:
-                    hist[col] = hist[col] / fx_rate
-
-    # Convert ASML analyst price targets to EUR (Session 3 Fix)
-    targets = fetch_price_targets_fmp(ticker)
-    if ticker == 'ASML' and price_eur and fx_rate and targets:
-        for key in ['targetMean', 'targetHigh', 'targetLow', 'targetMedian']:
-            if targets.get(key):
-                targets[key] = targets[key] / fx_rate
 
     return {
         'ticker': ticker,
         'historical': hist,
-        'current_price': price_eur if (ticker == 'ASML' and price_eur) else price,  # Session 3 Fix: ASML in EUR
+        'current_price': price,
         'quote_data': quote_data,
         # Original endpoints
-        'price_targets': targets,
+        'price_targets': fetch_price_targets_fmp(ticker),
         'earnings_date': fetch_earnings_fmp(ticker),
         'analyst_grade': fetch_grades_fmp(ticker),
         'momentum': fetch_momentum_fmp(ticker),
@@ -639,14 +635,26 @@ def fetch_stock_data_ldomi(ticker):
     
     # Get historical OHLC from Eulerpool candles
     hist = fetch_historical_eulerpool(ticker)
-    if hist is None:
-        print(f"   ❌ {ticker}: Eulerpool candles failed, skipping")
-        return None
     
-    current_price = float(hist['Close'].iloc[-1])
-    
-    # Get enrichment fields from Eulerpool
+    # Get enrichment fields from Eulerpool (includes current price from profile)
     eulerpool_bundle = fetch_stock_data_eulerpool(ticker)
+    
+    # CRITICAL: Use profile price (current) over candle price (potentially stale)
+    # Profile endpoint has mcap/shares which gives TODAY's price
+    # Candles may lag by days/weeks for low-volume European stocks
+    if eulerpool_bundle and eulerpool_bundle.get('current_price_from_profile'):
+        current_price = eulerpool_bundle['current_price_from_profile']
+        print(f"   💰 {ticker}: Current price €{current_price:.2f} (from profile - TODAY'S PRICE)")
+    else:
+        # Fallback to last candle if profile unavailable
+        if hist is None or hist.empty:
+            print(f"   ❌ {ticker}: No price data available, skipping")
+            return None
+        current_price = float(hist['Close'].iloc[-1])
+        last_date = hist['Date'].iloc[-1]
+        days_old = (datetime.now().date() - pd.to_datetime(last_date).date()).days
+        print(f"   ⚠️  {ticker}: Using last candle price €{current_price:.2f} (from {last_date}, {days_old} days old)")
+    
     
     if eulerpool_bundle:
         price_targets = eulerpool_bundle.get('price_targets', {})
@@ -707,8 +715,18 @@ def fetch_portfolio_data():
             # LDO.MI: Eulerpool complete (OHLC + enrichment)
             portfolio_data[ticker] = fetch_stock_data_ldomi(ticker)
         else:
-            # US stocks: FMP (with ASML EUR conversion inline)
+            # US stocks: FMP (with ASML EUR conversion)
             portfolio_data[ticker] = fetch_stock_data_fmp(ticker)
+    
+    # Convert ASML analyst targets to EUR if available
+    if 'ASML' in portfolio_data and portfolio_data['ASML']:
+        asml = portfolio_data['ASML']
+        if asml.get('_price_eur') and asml.get('price_targets'):
+            fx_rate = asml['_fx_rate']
+            targets = asml['price_targets']
+            for key in ['targetMean', 'targetHigh', 'targetLow', 'targetMedian']:
+                if targets.get(key):
+                    targets[f'{key}_eur'] = targets[key] / fx_rate
 
     ok = sum(1 for d in portfolio_data.values() if d and d.get('current_price') is not None)
     print(f"\n   Data fetched: {ok}/{len(PORTFOLIO)} stocks with price data")
