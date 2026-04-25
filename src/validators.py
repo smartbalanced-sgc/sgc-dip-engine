@@ -7,7 +7,7 @@ reaching the dashboard. Each gate validates at a pipeline stage.
 Design principles:
   - NEVER clamp data and pretend it's real. Flag or degrade instead.
   - NaN is the silent killer. Check at every gate.
-  - Log every warning so Jesse can see what the model distrusts.
+  - Log every warning so investor can see what the model distrusts.
   - Warnings use plain "caveman" language: what happened, why, what we did.
 
 Gate 1: Input data quality (after fetch, before models)
@@ -27,7 +27,7 @@ from config import (
     ANCHOR_MIN_RATIO, ANCHOR_MAX_RATIO, VOLUME_MIN_DAILY,
     VOL_UNMODELABLE_PCT, GARCH_STATIONARITY_WARN, CORR_MAX_OFFDIAG,
     DIP_EXTREME_FLAG_PCT, VIX_FLOOR, VIX_CEILING,
-    MIN_VALID_STOCKS, SIMULATION_DAYS
+    MIN_VALID_STOCKS, SIMULATION_DAYS, POWER_SECTOR_TICKERS
 )
 
 
@@ -124,8 +124,9 @@ def validate_input_data(portfolio_data):
                 warnings.append(f"{ticker}: {len(outliers)} moves over {RETURN_OUTLIER_PCT*100:.0f}% (max {worst*100:.0f}%). Real volatility OR data corrupted. Check quality.")
             data['_has_return_outliers'] = True
             
-            # Session 3: Track if Power sector stocks have outliers for context note
-            if ticker in ['CEG', 'VST']:
+            # Track if power sector stocks have outliers for context note
+            # Power sector tickers defined in config.yaml data.power_sector_tickers
+            if ticker in POWER_SECTOR_TICKERS:
                 has_power_sector_outliers = True
 
         # --- Price cross-check: quote vs last historical close ---
@@ -166,7 +167,7 @@ def validate_input_data(portfolio_data):
         warnings.append("NOTE: Growth stocks often show DCF warnings (AI premium vs traditional model). System uses analyst consensus instead.")
     
     if has_power_sector_outliers:
-        warnings.append("NOTE: Power sector (CEG, VST) has binary catalysts (PPA wins, restarts, regulation). >20% moves normal for role.")
+        warnings.append("NOTE: Power sector stocks have binary catalysts (PPA wins, reactor restarts, regulation). Large moves are normal for this role.")
 
     skipped = sum(1 for d in portfolio_data.values() if d.get('_skip'))
     valid = len(portfolio_data) - skipped
