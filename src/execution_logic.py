@@ -223,6 +223,13 @@ def process_execution_signals(simulation_results, portfolio_data=None, macro_eve
             macro_events=macro_events
         )
 
+        # Session 5: Rally stats for dashboard display
+        rally_date_range = format_date_range(
+            result.get('rally_date_index', 30),
+            earnings_date=earnings_date,
+            macro_events=macro_events
+        )
+
         execution_data[ticker] = {
             'signal': signal,
             'current_price': current,
@@ -237,6 +244,11 @@ def process_execution_signals(simulation_results, portfolio_data=None, macro_eve
             '_anchor_suppressed': anchor_suppressed,
             '_suppress_reason': suppress_reason,
             'fallback': fallback,  # Session 3: NEW FIELD
+            # Session 5: Rally stats
+            'rally_price': result.get('rally_60'),
+            'rally_pct': (result.get('rally_60', current) / current - 1) if current > 0 else 0,
+            'rally_date_range': rally_date_range,
+            'terminal_median': result.get('terminal_median'),
         }
 
     return execution_data
