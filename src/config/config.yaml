@@ -69,6 +69,15 @@ signal:
   # Applies to BOTH primary and fallback signals
   min_actionable_dip_pct: 0.03
 
+  # Rally target conviction: % of paths that reach rally target OR HIGHER
+  # 60 = 60% of paths reach this high (uses 40th percentile of maximums)
+  # Raise to show more conservative (shallower) rally targets
+  # Lower to show more aggressive (deeper) rally targets
+  rally_conviction_percentile: 60
+
+  # Minimum rally % to show on dashboard (hide trivial rallies)
+  min_actionable_rally_pct: 0.01
+
 # ----------------------------------------------------------------------------
 # MONTE CARLO SIMULATION
 # ----------------------------------------------------------------------------
@@ -182,6 +191,21 @@ data:
   # European stocks not available on FMP
   yfinance_tickers:
     - LDO.MI
+
+  # USD-traded tickers whose prices must be converted to EUR for display and Monte Carlo
+  # These are US ADR listings of European stocks (FMP returns USD price)
+  # Add any new EUR-denominated stock here — no code changes needed
+  # Note: ASML.AS (Amsterdam) needs Premium FMP; ASML (USD ADR) is on Starter
+  eur_display_tickers:
+    - ASML
+
+  # Power sector tickers — used to detect binary catalyst outliers
+  # These stocks routinely show >20% moves (PPA wins, reactor restarts, regulation)
+  # Dashboard shows a generic power sector context note when outliers are detected
+  # Add/remove tickers here as portfolio evolves
+  power_sector_tickers:
+    - CEG
+    - VST
   
   # Macro calendar filtering (US events only)
   # Keywords to match in economic calendar event names
