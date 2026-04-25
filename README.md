@@ -1,422 +1,313 @@
-# SGC Dip Engine for Portfolio v7 — AI-Enhanced Tactical Entry System
+# SGC Dip Engine v1
 
-**Purpose:** Daily BUY/WAIT signal generator for a 14-stock DCA portfolio. Tells the investor whether today's price is the best entry or if a meaningful dip is likely within 60 days.
+**Smart Growth Compounder — Tactical Entry Timing System**
 
-**Live Dashboard:** https://smartbalanced-sgc.github.io/sgc-dip-engine/<br>
-**Schedule:** 8:30 PM BST weekdays (30 min after US market close)<br>
-**Monthly deployment:** £500 across 14 stocks per Portfolio Constitution v7
+**Live Dashboard:** https://smartbalanced-sgc.github.io/sgc-dip-engine/  
+**Schedule:** Mon–Fri at 8:30 PM BST (auto-runs via GitHub Actions)  
+**Runtime:** ~2.5 minutes per run on cycles with no catalyst
 
 ---
 
 ## What It Does
 
-The SGC Dip Engine answers one question daily: **"Buy today or wait for a better dip within 60 days?"**
+The engine answers one question every trading day: **"Should I buy today, or wait for a better dip within the next 60 days?"**
 
-- 📊 **Monte Carlo Simulation:** 10,000 price paths per stock using GARCH volatility + HMM regime detection
-- 🤖 **AI Enrichment:** Real-time market intelligence via Claude API (web search + sentiment scoring)
-- 🎯 **Precise Targets:** Specific entry prices with 70%/80% conviction levels
-- 📅 **Date-Aware:** Catalyst timing (earnings, macro events) integrated into forecasts
-- ⚡ **Automated:** Runs Mon-Fri at 8:30 PM BST, publishes to GitHub Pages
+It runs 10,000 Monte Carlo simulations per stock, models correlated portfolio-level price paths using GARCH volatility and HMM regime detection, and generates a BUY or WAIT signal for each of the 14 portfolio holdings. The dashboard shows the predicted dip entry price, the expected recovery rally target, and a plain-English one-liner explaining the signal.
 
-**Portfolio:** 14 stocks, £39,090 target allocation, 13.47% weighted CAGR
-- **Core Growth:** NVDA, MSFT, GOOGL, META, AMZN (47%)
-- **Infrastructure:** AVGO, ASML, MU (22%)
-- **Power:** CEG, VST (7%)
-- **Resilience:** MA, CTAS, LDO.MI, WM (24%)
+The system is designed for a fixed DCA investing approach — it does not pick stocks, change position sizes, or recommend selling. It only optimises the timing of monthly capital deployment.
 
 ---
 
-## Quick Start
+## Portfolio
 
-### Prerequisites
+14 stocks, £39,090 target allocation, 13.47% weighted CAGR (Portfolio Constitution v7):
 
-- Python 3.10+
-- API Keys:
-  - **FMP (Financial Modeling Prep):** Starter plan ($10/month)
-  - **Eulerpool:** Free trial or paid (for LDO.MI data)
-  - **Anthropic:** Claude API access (~£10.50/month at current usage)
+| Segment | Tickers | Allocation |
+|---|---|---|
+| Core Growth | NVDA, MSFT, GOOGL, META, AMZN | 47% |
+| Infrastructure | AVGO, ASML, MU | 22% |
+| Power | CEG, VST | 7% |
+| Resilience | MA, CTAS, LDO.MI, WM | 24% |
 
-### Installation
-
-```bash
-# Clone repository
-git clone https://github.com/smartbalanced-sgc/sgc-dip-engine.git
-cd sgc-dip-engine
-
-# Install dependencies
-pip install -r requirements.txt
-
-# Configure API keys
-cp .env.example .env
-# Edit .env with your API keys:
-# FMP_API_KEY=your_fmp_key
-# EULERPOOL_TOKEN=your_eulerpool_token
-# ANTHROPIC_API_KEY=your_anthropic_key
-
-# Run locally
-cd src
-python main.py
-```
-
-### GitHub Actions Setup
-
-1. **Add Secrets** to your GitHub repository:
-   - `FMP_API_KEY`
-   - `EULERPOOL_TOKEN`
-   - `ANTHROPIC_API_KEY`
-
-2. **Enable GitHub Pages:**
-   - Settings → Pages → Source: Deploy from branch `main`
-   - Folder: `docs/`
-
-3. **Workflow runs automatically:**
-   - Mon-Fri at 8:30 PM BST (19:30 UTC cron)
-   - Manual trigger: Actions → "SGC Dip Engine - Daily Run" → Run workflow
+The portfolio composition is fully config-driven. Changing tickers or weights requires only editing `src/config/config.yaml` — no code changes needed for US stocks. Adding a European Eulerpool stock requires adding it to `yfinance_tickers` in config. Adding another EUR-denominated ADR requires adding it to `eur_display_tickers` in config.
 
 ---
 
-## How It Works
+## How to Read the Dashboard
 
-### 1. Data Fetching (3 minutes)
+Each stock card shows:
 
-**FMP API (13 US stocks):**
-```python
-# 15 endpoints per stock
-- historical-price-eod/full  # 230 days OHLC
-- quote                       # Current price, MA50, MA200, RSI
-- price-target-consensus      # Analyst targets
-- earnings                    # Next earnings date
-- analyst-estimates           # Forward EPS, revenue
-- upgrades-downgrades-consensus
-- insider-trading
-- institutional-ownership
-- stock-price-change          # 1M, 3M, 6M momentum
-# Plus 2 macro endpoints (VIX, SPY)
 ```
-
-**Eulerpool API (LDO.MI):**
-```python
-- equity/profile              # Current price (mcap ÷ shares)
-- equity/candles              # Historical OHLC
-- equity/price-target         # Analyst targets
-- equity/estimates            # Forward estimates
-- sentiment/price-metrics     # Beta
-- research/recommendations    # Analyst grades
-- equity-extended/aaqs        # Quality score
-- sentiment/insider-sentiment # Insider activity
-```
-
-**Currency Conversion:**
-- ASML: Fetch USD, display EUR (Trading212 native currency)
-- FX rates: exchangerate-api.com
-
-### 2. AI Enrichment (5 minutes, £0.48/day)
-
-**For each stock:**
-
-**Step 1: Web Search (Claude API)**
-```python
-prompt = f"Search for recent news (last 30 days) about {company}.
-Focus on: earnings, analyst actions, product launches, contracts.
-Provide 3-5 key facts impacting 60-day price action."
-
-# Settings (optimized for cost)
-max_tokens = 1000  # Was 4000 (60% cost reduction)
-```
-
-**Step 2: Sentiment Scoring (Claude API)**
-```python
-prompt = f"Score sentiment (-10 to +10) based on:
-- Search results: {news}
-- Analyst consensus: {grade}
-- Price targets: {targets}
-- Insider activity: {transactions}
-
-Cross-validate score against analyst consensus."
-
-# Settings (optimized for cost)
-max_tokens = 200  # Was 300
-```
-
-**Output:** Sentiment score adjusts Monte Carlo drift (-10% to +10%)
-
-**Cost Breakdown:**
-- Web search: £0.03/stock × 13 = £0.39/day
-- Sentiment: £0.01/stock × 13 = £0.13/day  
-- **Total: £0.48/day = £10.50/month** (60% cheaper than original)
-
-### 3. Monte Carlo Simulation (3 minutes)
-
-**Per stock:**
-
-```python
-# 1. GARCH(1,1) volatility forecast
-garch_model = GARCH(1, 1).fit(returns[-230:])
-volatility_forecast = garch_model.forecast(horizon=60)
-
-# 2. HMM regime detection (high/low volatility states)
-hmm = HMM(n_states=2).fit(returns[-230:])
-current_regime = hmm.predict(returns[-5:])
-drift_adjustment = regime_drift_map[current_regime]
-
-# 3. Simulate 10,000 correlated paths
-for path in range(10000):
-    for day in range(60):
-        drift = base_drift + sentiment_adjustment + drift_adjustment
-        shock = cholesky_correlation @ random_normal(14)
-        price[day+1] = price[day] * exp(drift + volatility * shock)
-    
-    min_price[path] = min(price)  # Track lowest low per path
-
-# 4. Extract percentile targets
-target_70 = percentile(min_price, 70)  # 70% of paths reach this
-target_80 = percentile(min_price, 80)  # 80% of paths reach this
-```
-
-**Correlation Matrix:**
-- Full 14×14 matrix from 230-day rolling window
-- Preserves portfolio relationships
-- Cholesky decomposition for efficiency
-
-### 4. Signal Generation (<1 minute)
-
-```python
-# Decision logic
-if P(today is 60-day minimum) > 0.5:
-    signal = "BUY"
-    reasoning = "Unlikely to dip further"
-elif (current_price - target_70) / current_price < 0.03:
-    signal = "BUY"
-    reasoning = f"Expected dip only {dip_pct:.1f}% — not worth waiting"
-else:
-    signal = "WAIT"
-    reasoning = f"{dip_desc} {dip_pct:.1f}% dip expected ({conviction}% conviction)"
-    fallback_target = target_80  # Shallower backup target
-
-# Format date range
-if near_earnings:
-    date_range = f"likely around earnings ({earnings_date})"
-else:
-    date_range = f"{window_start} - {window_end}"  # e.g., "May 9-23"
-```
-
-### 5. Dashboard Publishing (<1 minute)
-
-**HTML output includes:**
-- Current signals (BUY/WAIT) with targets and conviction
-- Data quality warnings (stale data, model breakage)
-- Backtest tracker (hit rate validation)
-- Historical signal grid (last 14 days)
-- One-liner explanations per stock
-
-**Example output:**
-```
-NVDA ⏳ WAIT RSI 71
+NVDA ⏳ WAIT  RSI 71
 $208.27 (today)
-⬇️ $198.96 · May 16-Jun 4 (4.5%)
+⬇️ $198.57 · May 14-28 (4.7%)        ← predicted dip entry, 70% conviction
+⬆️ $227.38 · May 07-21 (+9.2% rally, 60% conviction)  ← expected recovery peak
 Conviction: 70%
-Moderate 4.5% dip expected (70% conviction). Worth waiting.
-└─ Fallback: BUY at $202.88 (2.6% dip, 80% conviction) within 2 weeks
+Moderate 4.7% dip expected (70% conviction). Worth waiting.
+└─ Fallback: BUY NOW (2.7% dip, 80% conviction) Apr 24-May 08
 ```
 
----
-
-## Configuration
-
-### Core Settings (`src/config/config.yaml`)
-
-```yaml
-simulation:
-  paths: 10000                    # Monte Carlo iterations
-  horizon_days: 60                # Forecast window
-  percentile_primary: 70          # Main target (70% conviction)
-  percentile_fallback: 80         # Backup target (80% conviction)
-  materiality_threshold: 0.03     # 3% minimum dip to WAIT
-
-volatility:
-  garch_order: [1, 1]             # GARCH(1,1) specification
-  hmm_states: 2                   # High/low volatility regimes
-  lookback_days: 230              # Historical data window
-  earnings_spike: 1.5             # Volatility multiplier for earnings
-
-enrichment:
-  sentiment_enabled: true         # Toggle AI enrichment
-  sentiment_range: [-10, 10]      # Score bounds
-  web_search_lookback_days: 30    # Recent news window
-  max_tokens_search: 1000         # Web search token limit
-  max_tokens_sentiment: 200       # Sentiment token limit
-
-schedule:
-  timezone: "Europe/London"       # BST/GMT auto-adjust
-  cron: "30 19 * * 1-5"          # 8:30 PM BST Mon-Fri
-
-data_quality:
-  max_staleness_days: 10          # Skip if data >10 days old
-  min_historical_days: 200        # Require 200+ days for GARCH
 ```
-
-### Portfolio (`src/config/portfolio.yaml`)
-
-```yaml
-stocks:
-  - ticker: NVDA
-    weight: 0.12
-    sector: Core Growth
-  - ticker: ASML
-    weight: 0.08
-    sector: Infrastructure
-    currency_display: EUR  # Show EUR on dashboard
-  # ... 12 more stocks
-```
-
----
-
-## Dashboard Interpretation
-
-### BUY Signal (Deploy Capital Today)
-
-```
-MA 🟢 BUY RSI 47
+MA 🟢 BUY  RSI 47
 $504.17 (today)
-⬇️ $490.26 · May 9-23 (2.8% — immaterial)
+⬇️ $489.68 · May 10-24 (2.9% — immaterial)
+⬆️ $531.62 · Apr 27-May 11 (+5.4% rally, 60% conviction)
 Conviction: 70%
-Expected dip only 2.8% — not worth waiting. Buy today.
+Expected dip only 2.9% — not worth waiting. Buy today.
 ```
 
-**Meaning:**
-- RSI 47 = Neutral momentum (not overbought)
-- Predicted dip: 2.8% (below 3% threshold)
-- 70% of Monte Carlo paths reach $490 or lower
-- **Action:** Buy MA with this month's allocation
+**Dip line (⬇️):** The price 70% of Monte Carlo paths reach or go below within 60 days. If the predicted dip is less than 3%, it's classed as immaterial and the signal is BUY.
 
-### WAIT Signal (Hold Cash, Monitor)
+**Rally line (⬆️):** The price 60% of paths reach or go above within 60 days. This is the expected recovery ceiling, not a sell signal — the portfolio is buy-and-hold.
 
-```
-AMZN ⏳ WAIT RSI 80
-$263.99 (today)
-⬇️ $247.98 · May 9-23 (6.1%)
-Conviction: 70%
-Strong 6.1% dip expected (70% conviction). Be patient.
-└─ Fallback: BUY at $254.71 (3.5% dip, 80% conviction) likely around earnings (Apr 29)
-```
+**Fallback line:** If the primary dip target is missed, the 80% conviction fallback gives a shallower but more certain alternative entry level.
 
-**Meaning:**
-- RSI 80 = Very overbought (due for pullback)
-- Predicted dip: 6.1% (exceeds 3% threshold)
-- Primary target: $248 (70% conviction)
-- Fallback target: $255 (80% conviction, easier to hit)
-- **Action:** 
-  - Days 1-30: Wait for $248
-  - Days 31-45: Accept $255 if $248 missed
-  - Days 46-60: Buy at market if both missed
+**Conviction percentiles:** Both thresholds are adjustable in `config.yaml` — `percentile_target` (dip) and `rally_conviction_percentile` (rally).
 
-### Data Quality Warnings
+---
+
+## Architecture
+
+The engine runs as a sequential pipeline on GitHub Actions every weekday evening:
 
 ```
-⚠️ DATA QUALITY WARNINGS (3)
-GOOGL: Model $152 vs market $344. Model broken OR stock overvalued. Using analyst targets.
-ASML: Model $363 vs market $1246. Model broken OR stock overvalued. Using analyst targets.
-CEG: 3 moves over 20% (max 25%). Real volatility OR data corrupted. Check quality.
+Data Fetch → Gate 1 Validate → Regime Detection → Gate 2 Validate
+→ Catalyst Detection → AI Intelligence → Correlation Matrix
+→ Monte Carlo → Gate 3 Validate → Signal Generation
+→ Gate 4 Validate → Dashboard → Archive
 ```
 
-**Interpretation:**
-- **DCF breakage:** Growth stocks trade at AI premium, traditional models undervalue → use analyst targets instead
-- **Extreme moves:** Power sector (CEG, VST) has binary catalysts (PPA wins) → 20%+ moves are normal
+### Step 1: Data Fetching
+
+**US stocks (13) — FMP API:**
+
+Each stock fetches up to 15 endpoints including 230 days of OHLCV history, current price and RSI, analyst price targets and consensus, next earnings date, forward EPS estimates, analyst grade history, insider transaction statistics, momentum (1M/3M/6M), DCF estimate, and financial quality scores.
+
+Two macro endpoints fetch the current VIX level and SPY price for regime classification.
+
+**LDO.MI — Eulerpool API:**
+
+Leonardo SpA (Italian defence, Milan exchange) is not available on FMP. All data comes from Eulerpool:
+
+- **Current price:** Calculated as `market_cap ÷ shares_outstanding` from `/equity/profile`. This is always fresh (live exchange data), even when historical candles lag.
+- **Historical OHLC:** `/equity/candles` (230 days). May lag by days/weeks for low-liquidity European stocks.
+- **Enrichment:** Analyst targets, estimates, grades, beta, insider activity, AAQS quality score.
+
+Because Eulerpool candles do not include volume data, the volume validator is skipped for this stock.
+
+**ASML EUR conversion:**
+
+FMP provides ASML as a USD-listed ADR. The engine converts the current price, full historical OHLC, and analyst targets to EUR using a live FX rate (exchangerate-api.com) before Monte Carlo runs. This ensures the simulation and all targets are EUR-native. The conversion applies to any ticker in the `eur_display_tickers` config list — adding another EUR ADR only requires updating that list.
+
+### Step 2: Gate 1 Validation
+
+Four data quality checks per stock before any modelling runs:
+
+- **Freshness:** If candle data is older than 10 days and no fresh current price is available from a profile endpoint, the stock is skipped. Skipped stocks appear in the warning banner with an explanation.
+- **History depth:** Minimum 50 rows to run at all; minimum 200 rows for full GARCH precision.
+- **Returns outliers:** Any single-day return above 20% is flagged. This is data-quality-neutral for power sector stocks (binary catalysts are expected) but flagged for transparency.
+- **DCF sanity:** If the DCF model price is less than 50% or more than 250% of market price, it is discarded and analyst consensus used instead. Growth stocks consistently trigger this — it is normal and explained in the warning banner.
+
+### Step 3: Regime Detection
+
+**Macro regime (portfolio-wide):** VIX level and SPY price classify the market as risk-on, neutral, or risk-off. This adjusts the drift and volatility multipliers applied to the entire simulation batch.
+
+**Per-stock regime (HMM):** A two-state Hidden Markov Model classifies each stock as currently in a high-volatility or low-volatility regime based on its recent return history. This adjusts the per-stock volatility input to GARCH.
+
+### Step 4: AI Intelligence (Trigger-Based)
+
+This is the most important section to understand. The engine does **not** run AI on every stock every day. That approach was evaluated and found to cost £5/run while producing negligible signal impact (sentiment modifying drift by ±0.82% against 7%+ daily noise). It was replaced with a trigger-based architecture.
+
+**Layer 0 — Free structural enrichment (runs every stock, every day, zero AI cost):**
+
+Analyst disagreement (the spread between analyst high and low price targets) is used as an uncertainty proxy. Wide spread → wider volatility distribution in Monte Carlo. This is calculated from already-fetched FMP data.
+
+Earnings proximity applies a configurable volatility multiplier automatically: 1.5× within 14 days of earnings, 1.3× within 30 days, 1.15× within 60 days. On the earnings day itself, the time-varying vol schedule spikes to 3×.
+
+Insider activity (net buying vs selling ratio) applies a small drift bias using the same already-fetched FMP data.
+
+**Layer 1 — Catalyst-triggered AI (no web search, structured data only):**
+
+AI fires only when one of three triggers is detected:
+
+| Trigger | Condition | What AI does | Cost |
+|---|---|---|---|
+| Post-earnings | Stock reported within last 3 days | Classifies vol regime as HIGH/MEDIUM/LOW for next 30 days. Monte Carlo widens or narrows distribution by 25–30%. Dashboard shows `⚡ AI: Vol HIGH 🔴` badge. | ~£0.002 |
+| Unusual move | Beta-adjusted residual Z-score > 2.5 | Classifies the move as MACRO_CONTAGION / COMPETITOR_EVENT / THESIS_RISK / TECHNICAL. If THESIS_RISK, vol is elevated. | ~£0.002 |
+| BUY prioritisation | 2+ BUY signals same day | Ranks deployment order using insider activity, analyst trend, momentum, earnings proximity. | ~£0.002 |
+
+The Z-score trigger is beta-adjusted: a 3% move in NVDA (beta 1.8) requires the same trigger threshold as a 1.7% move in WM (beta 0.7). Raw percentage moves would fire constantly on high-beta stocks during normal market-wide moves.
+
+**Layer 2 — Emergency web search (rare):**
+
+If a stock shows a residual Z-score above 3.0 with no visible FMP explanation (no earnings, no analyst grade change, no insider event), one targeted web search fires to diagnose the cause. This protects against deploying capital into thesis-breaking news that FMP hasn't captured yet. Expected frequency: 2–3 times per month across the entire portfolio.
+
+**Why AI modifies volatility, not drift:**
+
+The engine answers "will the stock be lower at some point in the next 60 days?" — a question about the left tail of the return distribution, not expected return. Drift adjustment (what sentiment scoring does) shifts where all 10,000 paths end up on average. Volatility adjustment changes how wide the distribution is, which directly changes dip depth predictions. A 30% vol regime change moves dip targets by 5–15%, which can flip a BUY/WAIT signal. A drift adjustment of ±5% produces less than 1% change in dip targets.
+
+**Cost:**
+
+On a typical quiet day (no catalysts): **£0.00**. On an earnings week (4–6 post-earnings calls): ~£0.01–0.02. Emergency search: ~£0.08. Monthly total: **£0.20–0.50**, down from £110/month under the previous blanket-search approach.
+
+### Step 5: Monte Carlo Simulation
+
+For each stock, the engine runs 10,000 correlated price path simulations over 60 trading days.
+
+**Volatility input:** GARCH(1,1) fitted on the stock's historical returns. GARCH captures volatility clustering — the tendency of large moves to follow large moves. The estimate is then adjusted by: regime multiplier (from HMM), macro multiplier (from VIX regime), earnings proximity multiplier, analyst spread multiplier, and AI vol regime output (if a catalyst triggered).
+
+**Drift input:** A small positive drift per period (reflecting expected long-term compounding) adjusted by: RSI (overbought stocks pull drift negative), momentum (contrarian — strong recent rallies slightly reduce expected near-term drift), and insider activity (net buying adds a small positive bias).
+
+**Correlation:** A full 14×14 correlation matrix is built from 60-day rolling returns. This is decomposed via Cholesky factorisation to generate correlated random shocks for all 14 stocks simultaneously. The portfolio doesn't simulate each stock independently — they move together as they do in reality.
+
+**Time-varying vol schedule:** Rather than applying a uniform earnings multiplier across all 60 days, the schedule concentrates the vol spike on and around the actual earnings announcement day. The day itself gets 3× base vol, the two days either side get 1.5×, and all other days run at base vol.
+
+**Output extraction:** From the 10,000 path minimums:
+- 70th percentile minimum → primary dip target (70% of paths reach this or lower)
+- 80th percentile minimum → fallback dip target (80% conviction, shallower)
+
+From the 10,000 path maximums:
+- `(100 - rally_conviction_percentile)`th percentile maximum → rally target (default 60% conviction = 40th percentile of maximums, meaning 60% of paths reach this high or higher)
+
+Both percentile thresholds are adjustable in `config.yaml`.
+
+### Step 6: Signal Generation
+
+```
+IF predicted_dip < 3%:
+    → BUY (immaterial dip, not worth waiting)
+ELSE:
+    → WAIT (meaningful dip predicted)
+    Show fallback target at 80th percentile
+```
+
+The 3% materiality threshold is configurable in `config.yaml` (`min_actionable_dip_pct`). On typical £400–500 monthly position sizes, a sub-3% dip saves less than £15 and is not worth the risk of missing a rally.
+
+Date ranges are shown as actual calendar dates (e.g. "May 14–28") anchored to the median day across all 10,000 paths. If the predicted dip aligns within 3 days of an earnings date or major macro event, the display shows "likely around earnings (May 29)" instead.
+
+### Step 7: Dashboard and Archiving
+
+The dashboard is a static HTML file published to GitHub Pages. It refreshes every run and includes:
+
+- Warning banner (collapsed by default) with data quality issues
+- Backtest tracker showing how many days of signal history have been collected
+- Summary header listing BUY and WAIT stocks
+- Per-stock signal cards with dip target, rally target, RSI, conviction, one-liner, fallback
+- AI catalyst badge on stocks where AI fired (e.g. `⚡ AI: Vol HIGH 🔴 — Cloud revenue miss on Azure guidance`)
+
+Each run appends to `data/signal_history.csv` for backtest validation.
 
 ---
 
 ## Backtest Validation
 
-### Framework
+The engine records every WAIT signal with its predicted dip target and predicted date. 60 trading days later, it checks whether the actual price reached the predicted target. The hit rate should approximate the percentile setting (a 70th percentile target should be reached by roughly 70% of paths in reality). If the hit rate diverges materially, the percentile is recalibrated.
 
-**Daily archive:**
-```python
-# signal_history.csv
-date,ticker,signal,predicted_dip,predicted_target,current_price,actual_60day_low,hit
-2026-04-25,NVDA,WAIT,4.5,198.96,208.27,null,null  # Filled 60 days later
-```
+**Current status:** 3/14 days collected (first cohort needs 14 days). First validation expected early June 2026.
 
-**Validation (60 days later):**
-```python
-actual_low = min(prices[date : date+60])
-hit = actual_low <= predicted_target
-hit_rate = sum(hits) / len(signals)
-```
-
-**Current Status:**
-- 3/14 days collected (started Apr 23)
-- Need 11 more days for first cohort
-- **Target:** Hit rate ≈ 70% (matches percentile)
-- **Recalibration:** If hit rate ≠ 70%, adjust percentile
-
-### Expected Outcomes
-
-| Hit Rate | Interpretation | Action |
-|----------|---------------|---------|
-| 65-75% | Well-calibrated | Keep 70th percentile |
-| 75-85% | Too conservative | Lower to 65th (deeper dips) |
-| 55-65% | Too aggressive | Raise to 75th (shallower dips) |
-| <55% | Model broken | Investigate GARCH/HMM |
+| Hit Rate | Interpretation | Recalibration |
+|---|---|---|
+| 65–75% | Well-calibrated | Keep at 70th percentile |
+| 75–85% | Dips too shallow (too aggressive) | Lower to 65th |
+| 55–65% | Dips too deep (too conservative) | Raise to 75th |
+| <55% | Model issue | Investigate GARCH/HMM inputs |
 
 ---
 
-## Troubleshooting
+## Configuration Reference
 
-### Dashboard not updating
+All behavioural parameters live in `src/config/config.yaml`. No Python file changes are needed for routine tuning.
 
-```bash
-# Check GitHub Actions logs
-# Visit: https://github.com/[your-repo]/actions
+```yaml
+# --- Signal thresholds ---
+signal:
+  percentile_target: 70          # Dip conviction (70% of paths reach this low or lower)
+  fallback_percentile: 80        # Fallback dip conviction
+  min_actionable_dip_pct: 0.03   # Minimum dip to WAIT (3%)
+  rally_conviction_percentile: 60 # Rally conviction (60% of paths reach this high or higher)
+  min_actionable_rally_pct: 0.01  # Minimum rally to display on dashboard (1%)
 
-# Common issues:
-1. API key expired → Update GitHub Secrets
-2. FMP rate limit → Wait 1 hour or upgrade plan
-3. Cron delay → GitHub queue, wait 15-30 min
+# --- Monte Carlo ---
+monte_carlo:
+  num_paths: 10000               # Simulation iterations
+  simulation_days: 60            # Forecast window
+  lookback_days: 730             # Historical data for GARCH fitting
+
+# --- Earnings vol schedule ---
+volatility_schedule:
+  enabled: true
+  earnings_day_multiplier: 3.0   # Vol on the earnings day itself
+  earnings_pre_post_multiplier: 1.5  # Vol on ±2 days around earnings
+  macro_event_multiplier: 2.0    # Vol on FOMC/CPI days
+
+# --- Data sources ---
+data:
+  yfinance_tickers: [LDO.MI]     # European stocks → Eulerpool fetcher
+  eur_display_tickers: [ASML]    # USD ADRs that display in EUR
+  power_sector_tickers: [CEG, VST]  # Stocks with binary catalyst outliers
+
+# --- Enrichment coefficients ---
+enrichment:
+  rsi_coefficient: 500           # (50 - RSI) / 500 → drift modifier
+  momentum_coefficient: 1000     # -momentum_1M / 1000 → drift modifier
+  insider_coefficient: 25        # (ratio - 0.5) / 25 → drift modifier, capped ±0.03
+  max_total_drift: 0.10          # Cap on total enrichment drift
+
+# --- Validation thresholds ---
+validation:
+  gate1:
+    hist_max_stale_days: 5       # Warn if data older than 5 days
+    hist_min_rows_skip: 50       # Skip if fewer than 50 rows
+    return_outlier_pct: 0.20     # Flag single-day moves >20%
 ```
 
-### LDO.MI skipped
+---
+
+## Portfolio Agnosticism
+
+The engine is designed so that changing the portfolio requires only config edits, not code changes, with two caveats:
+
+**What only needs config changes:**
+- Add or remove any US stock: add/remove from `tickers` and `weights` in config.yaml
+- Add another European Eulerpool stock: add to `yfinance_tickers` list
+- Add another EUR-denominated USD ADR: add to `eur_display_tickers` list
+- Add/remove power sector stocks: update `power_sector_tickers`
+- Change allocation weights: update `weights`
+
+**What requires code changes:**
+- A stock on a data source other than FMP or Eulerpool (new data fetcher needed)
+- A non-EUR/non-USD currency with FX conversion requirements (extend the EUR conversion logic)
+
+---
+
+## Running Locally
 
 ```bash
-# Issue: Data >10 days old
-# Fix: Profile endpoint should provide current price via mcap/shares
+git clone https://github.com/smartbalanced-sgc/sgc-dip-engine.git
+cd sgc-dip-engine
 
-# Check logs for:
-"💰 LDO.MI: Current price €54.01 (from profile - TODAY'S PRICE)"
+pip install -r requirements.txt
 
-# If seeing candle fallback:
-"⚠️ LDO.MI: Using last candle price €57.78 (from 2026-04-07, 18 days old)"
+# Create .env with API keys
+cp .env.example .env
+# Edit .env:
+# FMP_API_KEY=your_key
+# EULERPOOL_TOKEN=your_token
+# ANTHROPIC_API_KEY=your_key
 
-# Then profile endpoint failed → check Eulerpool token
+cd src
+python main.py
 ```
 
-### High AI costs
+---
 
-```bash
-# Current: £10.50/month (optimized)
-# Original: £26/month (pre-optimization)
+## GitHub Actions Setup
 
-# Further optimize:
-1. Reduce tokens: max_tokens_search 1000 → 800 (sentiment.py line 69)
-2. Add caching: Skip sentiment if no catalyst (cache 24h)
-3. Disable AI: Set sentiment_enabled: false in config.yaml
+1. Add repository secrets: `FMP_API_KEY`, `EULERPOOL_TOKEN`, `ANTHROPIC_API_KEY`
+2. Enable GitHub Pages: Settings → Pages → Source: `main` branch, `/docs` folder
+3. The workflow in `.github/workflows/daily_run.yml` runs automatically at 19:30 UTC (8:30 PM BST) Mon–Fri
 
-# ROI check:
-# Did sentiment change any actual trades in last 30 days?
-# If no → Consider disabling, RSI alone may be sufficient
-```
-
-### Timezone display wrong
-
-```bash
-# Issue: Dashboard shows UTC instead of BST
-# Fix: Ensure pytz installed
-
-pip install pytz>=2024.1
-
-# Check dashboard_generator.py imports:
-from pytz import timezone
-london_tz = timezone('Europe/London')
-```
+Manual trigger: Actions tab → "SGC Dip Engine - Daily Run" → Run workflow
 
 ---
 
@@ -424,123 +315,91 @@ london_tz = timezone('Europe/London')
 
 ```
 sgc-dip-engine/
-├── .github/
-│   └── workflows/
-│       └── daily_run.yml           # GitHub Actions cron (8:30 PM BST)
+├── .github/workflows/
+│   └── daily_run.yml          # Cron schedule and GitHub Actions pipeline
 ├── src/
-│   ├── main.py                     # Orchestrator (11 min runtime)
-│   ├── data_fetcher.py             # API calls (FMP, Eulerpool, Claude)
-│   ├── monte_carlo.py              # GARCH + HMM + simulation
-│   ├── sentiment.py                # AI enrichment layer
-│   ├── execution_logic.py          # Signal generation
-│   ├── dashboard_generator.py      # HTML rendering
+│   ├── main.py                # Orchestrator: runs all 8 pipeline steps
+│   ├── data_fetcher.py        # FMP + Eulerpool data fetching, EUR conversion
+│   ├── garch_model.py         # GARCH(1,1) volatility estimation
+│   ├── hmm_regime.py          # HMM per-stock regime classification
+│   ├── macro_regime.py        # VIX/SPY macro regime classification
+│   ├── correlation.py         # Portfolio correlation matrix + Cholesky
+│   ├── monte_carlo.py         # Simulation engine, enrichment, statistics
+│   ├── sentiment.py           # Trigger-based AI intelligence layer
+│   ├── execution_logic.py     # BUY/WAIT signal generation + date formatting
+│   ├── dashboard_generator.py # HTML dashboard rendering
+│   ├── validators.py          # Four-gate data quality pipeline
+│   ├── signal_archiver.py     # Writes signal_history.csv for backtest
+│   ├── backtest.py            # Hit rate calculation against actuals
+│   ├── config.py              # Exports all constants from config.yaml
+│   ├── config_loader.py       # YAML loading utility
 │   └── config/
-│       ├── config.yaml             # System settings
-│       └── portfolio.yaml          # 14 stocks + allocations
+│       └── config.yaml        # All tunable parameters (edit here, not in Python)
 ├── data/
-│   └── signal_history.csv          # Backtest archive
+│   └── signal_history.csv     # Backtest archive (WAIT signals + actuals)
 ├── docs/
-│   └── index.html                  # Published dashboard (GitHub Pages)
-├── requirements.txt                # Python dependencies
-├── .env.example                    # API key template
-└── README.md                       # This file
+│   └── index.html             # Published dashboard (GitHub Pages)
+├── requirements.txt
+├── .env.example
+└── README.md
 ```
 
 ---
 
 ## Dependencies
 
-```txt
-# requirements.txt
+```
 pandas>=2.0.0
 numpy>=1.24.0
 scipy>=1.10.0
 requests>=2.28.0
 anthropic>=0.18.0
-arch>=5.5.0          # GARCH models
+arch>=5.5.0          # GARCH(1,1)
 hmmlearn>=0.3.0      # Hidden Markov Models
 statsmodels>=0.14.0
 python-dotenv>=1.0.0
-pytz>=2024.1         # Timezone handling
+pytz>=2024.1
 ```
 
 ---
 
-## API Cost Breakdown
+## API Costs
 
-| Service | Usage | Monthly Cost |
-|---------|-------|--------------|
-| **FMP (Starter)** | 13 stocks × 15 endpoints/day × 22 days | $10 (flat) |
-| **Eulerpool** | 1 stock × 8 endpoints/day × 22 days | Included |
-| **Claude API** | 13 stocks × 2 calls/day × 22 days @ £0.48/day | £10.50 |
-| **FX Rates** | 1 call/day × 22 days | Free |
-| **GitHub** | Actions (242 min/month) + Pages | Free |
-| **TOTAL** | | **£20.50/month ($26)** |
+| Service | Plan | Monthly Cost |
+|---|---|---|
+| FMP (Financial Modeling Prep) | Starter ($10/month flat) | $10 |
+| Eulerpool | Included in subscription | — |
+| Anthropic Claude API | Pay-per-use, trigger-based | £0.20–0.50 |
+| exchangerate-api.com (FX) | Free tier | £0 |
+| GitHub Actions + Pages | Free tier | £0 |
+| **Total** | | **~£8–9/month** |
 
-**Optimization History:**
-- Original AI cost: £1.19/day = £26/month
-- After token reduction: £0.48/day = £10.50/month (60% savings)
-- Potential with caching: £0.18/day = £4/month (85% savings)
+The AI cost was previously £110/month (blanket daily web search on all 13 stocks). The current trigger-based architecture fires 0–6 targeted calls per day using already-fetched structured data, with web search reserved for genuine emergencies (3-sigma unexplained moves). On most days the AI cost is £0.
 
 ---
 
-## Roadmap
+## Troubleshooting
 
-### ✅ Completed (v7.0)
+**Dashboard not updating:**
+Check GitHub Actions logs. Common causes: API key expired (update Secrets), FMP rate limit hit (wait 1 hour), GitHub Actions queue delay (up to 30 min at peak times).
 
-- [x] Monte Carlo simulation with GARCH + HMM
-- [x] AI enrichment (web search + sentiment)
-- [x] Token cost optimization (60% reduction)
-- [x] ASML EUR conversion for Trading212
-- [x] LDO.MI current price from profile endpoint
-- [x] Stale data protection (>10 days → skip)
-- [x] Percentile calibration (70th/80th)
-- [x] Timezone handling (BST/GMT auto-adjust)
-- [x] GitHub Actions automation
-- [x] GitHub Pages dashboard
+**LDO.MI skipped:**
+The profile endpoint `eulerpool_get()` returns the current price via market cap ÷ shares. If this fails (auth error, network), the candle price is used as fallback and the staleness check may skip the stock. Check that `EULERPOOL_TOKEN` is set correctly in GitHub Secrets and that the token has not expired.
 
-### 🔄 In Progress
+**ASML showing rally instead of dip:**
+All ASML prices (current, historical OHLC, analyst targets) must be converted to EUR before Monte Carlo runs. If the EUR conversion fails silently (FX rate API down), the simulation runs on USD prices but displays EUR symbols, inverting the dip/rally direction. Check FX rate fetch logs.
 
-- [ ] Backtest validation (3/14 days collected)
-- [ ] Hit rate measurement (target: 70%)
-- [ ] Post-earnings re-evaluation (May 1)
-
-### 📋 Planned
-
-**Short-term (30 days):**
-- [ ] Date range enhancement ("May 9-23" vs "weeks 2-4")
-- [ ] Sentiment caching (70% cost reduction)
-- [ ] European data reliability monitoring
-
-**Medium-term (90 days):**
-- [ ] Adaptive percentile (auto-calibrate from backtest)
-- [ ] Extreme volatility investigation (VST, CEG, AVGO)
-- [ ] Multi-timeframe targets (30/60/90 day)
-
-**Long-term (12 months):**
-- [ ] Regime-aware calibration (VIX-based adjustment)
-- [ ] Portfolio-level optimization (correlation-aware deployment)
-- [ ] Alternative data sources (reduce FMP dependency)
+**All stocks showing WAIT:**
+This is normal behaviour during earnings clusters (when most portfolio stocks report within a short window) or when average RSI is high across the portfolio. The warning banner will note if all stocks show WAIT. Check earnings dates — if most stocks report within the next 2 weeks, universal WAIT is expected and correct.
 
 ---
 
-## Contributing
+## Disclaimer
 
-This is a personal project for my SGC portfolio. Not accepting external contributions, but feel free to fork for your own use.
-
-## License
-
-MIT License - Use at your own risk. Not financial advice.
-
-## Contact
-
-- **Author:** Jesse (Aidy)
-- **Portfolio:** Smart Growth Compounder (SGC)
-- **Dashboard:** https://smartbalanced-sgc.github.io/sgc-dip-engine/
+Not financial advice. This system is a personal tool for entry timing optimisation within a pre-defined buy-and-hold DCA strategy. All signals are probabilistic, not deterministic. Past backtest performance does not guarantee future hit rates. Always apply your own judgement before deploying capital.
 
 ---
 
-**Version:** 7.0 (AI-Enhanced Production + LDO.MI Fix)  
+**Version:** 7.0  
 **Last Updated:** April 25, 2026  
-**Build Status:** ✅ Operational  
-**Next Review:** June 8, 2026 (Post-Backtest Validation)
+**Dashboard:** https://smartbalanced-sgc.github.io/sgc-dip-engine/
