@@ -154,6 +154,27 @@ def generate_html(execution_data, macro_regime, vix, portfolio_data,
         else:
             target_display = f"⬇️ {ccy}{data['target_price']:.2f} · {data['date_range']} ({dip_display})"
 
+        # Session 5: Rally line (⬆️ expected rally target, 60% conviction)
+        rally_display = ""
+        rally_price = data.get('rally_price')
+        rally_pct = data.get('rally_pct', 0)
+        rally_date_range = data.get('rally_date_range', '')
+        if rally_price and rally_pct > 0.01:  # Only show if >1% rally expected
+            rally_display = f"⬆️ {ccy}{rally_price:.2f} · {rally_date_range} (+{rally_pct*100:.1f}% rally, 60% conviction)"
+
+        # Session 5: AI catalyst badge (only on triggered stocks)
+        ai_badge = ""
+        ai_result = p_data.get('ai_result', {})
+        if isinstance(ai_result, dict) and ai_result.get('narrative'):
+            vol_regime = ai_result.get('vol_regime', '')
+            thesis = ai_result.get('thesis_status', '')
+            if vol_regime:
+                regime_icon = '🟢' if vol_regime == 'LOW' else '🔴' if vol_regime == 'HIGH' else '🟡'
+                ai_badge = f'<div style="font-size: 12px; color: #aaa; margin-top: 4px;">⚡ AI: Vol {vol_regime} {regime_icon} — {ai_result["narrative"][:60]}</div>'
+            elif thesis:
+                thesis_icon = '🟢' if thesis == 'INTACT' else '🔴' if thesis == 'CRITICAL' else '🟡'
+                ai_badge = f'<div style="font-size: 12px; color: #aaa; margin-top: 4px;">⚡ AI: Thesis {thesis} {thesis_icon} — {ai_result["narrative"][:60]}</div>'
+
         # RSI badge
         rsi_val = p_data.get('rsi')
         rsi_display = ""
@@ -190,9 +211,11 @@ def generate_html(execution_data, macro_regime, vix, portfolio_data,
                 </div>
                 <div class="price-row">{ccy}{display_price:.2f} (today)</div>
                 <div class="target-row">{target_display}</div>
+                <div class="target-row" style="color: #4ade80;">{rally_display}</div>
                 <div class="confidence-row">{conviction_display}</div>
                 <div class="oneliner">{data['one_liner']}</div>
                 {fallback_html}
+                {ai_badge}
             </td>
             <td class="earnings">{earnings_display}</td>
         </tr>
