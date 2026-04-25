@@ -157,15 +157,17 @@ def format_date_range(median_date_index, days_window=7, earnings_date=None, macr
             except (ValueError, TypeError):
                 pass
 
-    # Fallback: honest time buckets — rationale.md §format_date_range
-    if median_date_index <= 10:
-        return "within 2 weeks"
-    elif median_date_index <= 30:
-        return "around weeks 2-4"
-    elif median_date_index <= 45:
-        return "around weeks 3-6"
+    # Fallback: show actual calendar date ranges
+    # Calculate start and end dates for the time window
+    dip_date = today + timedelta(days=median_date_index)
+    window_start = dip_date - timedelta(days=days_window)
+    window_end = dip_date + timedelta(days=days_window)
+    
+    # Format: "May 9-23" (single month) or "May 30-Jun 6" (spans months)
+    if window_start.month == window_end.month:
+        return f"{window_start.strftime('%b %d')}-{window_end.strftime('%d')}"
     else:
-        return "around weeks 6-8"
+        return f"{window_start.strftime('%b %d')}-{window_end.strftime('%b %d')}"
 
 
 def process_execution_signals(simulation_results, portfolio_data=None, macro_events=None):
