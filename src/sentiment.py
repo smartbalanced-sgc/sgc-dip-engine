@@ -66,7 +66,7 @@ Provide 3-5 key recent facts that would impact stock price in next 60 days."""
  
         search_response = client.messages.create(
             model="claude-sonnet-4-20250514",
-            max_tokens=4000,
+            max_tokens=1000,
             tools=[{
                 "type": "web_search_20250305",
                 "name": "web_search"
@@ -128,7 +128,7 @@ NARRATIVE: [one sentence with specific recent facts, max 100 chars]"""
         
         sentiment_response = client.messages.create(
             model="claude-sonnet-4-20250514",
-            max_tokens=300,
+            max_tokens=200,
             messages=[{"role": "user", "content": sentiment_prompt}]
         )
         
