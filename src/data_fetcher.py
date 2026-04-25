@@ -656,8 +656,10 @@ def fetch_stock_data_ldomi(ticker):
     # Candles may lag by days/weeks for low-volume European stocks
     if eulerpool_bundle and eulerpool_bundle.get('current_price_from_profile'):
         current_price = eulerpool_bundle['current_price_from_profile']
+        price_is_fresh = True
         print(f"   💰 {ticker}: Current price €{current_price:.2f} (from profile - TODAY'S PRICE)")
     else:
+        price_is_fresh = False
         # Fallback to last candle if profile unavailable
         if hist is None or hist.empty:
             print(f"   ❌ {ticker}: No price data available, skipping")
@@ -710,7 +712,8 @@ def fetch_stock_data_ldomi(ticker):
         'insider_stats': insider_stats,
         'analyst_grade': {},  # Eulerpool /equity/upgrades returns empty for LDO.MI
         'dcf_value': None,    # Eulerpool doesn't provide DCF
-        '_no_volume': True    # Flag for validators (Eulerpool candles have Volume=0)
+        '_no_volume': True,   # Flag for validators (Eulerpool candles have Volume=0)
+        '_price_is_fresh': price_is_fresh  # Flag: profile price is current, bypass staleness
     }
 
 
