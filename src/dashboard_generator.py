@@ -330,10 +330,10 @@ def generate_html(execution_data, macro_regime, vix, portfolio_data,
         .price-row {{ color: #e8eaed; margin-bottom: 6px; }}
         .target-row {{ color: #ffa726; margin-bottom: 6px; font-weight: 500; }}
         .confidence-row {{ color: #a0a5b0; font-size: 0.9em; margin-bottom: 8px; }}
-        .consensus-row {{ color: #b0b5c0; font-size: 0.85em; margin-top: 6px; font-style: italic; }}
+        .consensus-row {{ color: #b0b5c0; font-size: 0.85em; margin-top: 6px; }}
         .oneliner {{
             background: #2d3548; padding: 10px; border-radius: 6px;
-            font-size: 0.9em; color: #b0b5c0; font-style: italic; margin-top: 8px;
+            font-size: 0.9em; color: #b0b5c0; margin-top: 8px;
         }}
         .earnings {{ text-align: center; font-weight: 500; }}
 
