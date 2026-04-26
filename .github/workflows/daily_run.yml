@@ -2,7 +2,8 @@ name: SGC Dip Engine - Daily Run
 
 on:
   schedule:
-    - cron: '30 19 * * 1-5'  # 7:30 PM UTC = 8:30 PM BST
+    - cron: '30 19 * * 1-5'  # Mon-Fri 7:30 PM UTC = 8:30 PM BST (full run + archive)
+    - cron: '30 19 * * 0'    # Sunday  7:30 PM UTC = 8:30 PM BST (dashboard only, no archive)
   
   workflow_dispatch:
 
