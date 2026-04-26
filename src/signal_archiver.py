@@ -25,6 +25,15 @@ def archive_signals(execution_data, portfolio_data):
         int: Number of signals archived
     """
     # Find data directory
+    # Skip archiving on weekends — weekend runs generate dashboard only.
+    # Saturday/Sunday prices are Friday's close; archiving creates duplicate
+    # signal rows with identical data, inflating the backtest denominator.
+    # weekday(): Monday=0 … Friday=4, Saturday=5, Sunday=6
+    if datetime.now().weekday() >= 5:
+        print("📅 Weekend run — dashboard generated, backtest archive skipped.")
+        return 0
+
+    # Find data directory
     repo_root = Path(__file__).parent.parent
     data_dir = repo_root / 'data'
     data_dir.mkdir(exist_ok=True)
