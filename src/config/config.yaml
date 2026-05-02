@@ -30,6 +30,9 @@ portfolio:
     - IGLN
     - TSLA
     - INOD
+    - ADP
+    - VISA
+    - ELI
   
   # Portfolio weights (Constitution v7)
   # Used for display and future weighted correlation
