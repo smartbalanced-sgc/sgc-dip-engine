@@ -27,6 +27,9 @@ portfolio:
     - VST
     - CEG
     - LDO.MI
+    - IGLN
+    - TSLA
+    - INOD
   
   # Portfolio weights (Constitution v7)
   # Used for display and future weighted correlation
