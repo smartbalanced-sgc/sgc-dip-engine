@@ -33,6 +33,7 @@ portfolio:
     - ADP
     - V
     - LLY
+    - LIN
   
   # Portfolio weights (Constitution v7)
   # Used for display and future weighted correlation
