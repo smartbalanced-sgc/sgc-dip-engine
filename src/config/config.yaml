@@ -36,6 +36,8 @@ portfolio:
     - LIN
     - WMT
     - PLTR
+    - AMD
+    - INTC
   
   # Portfolio weights (Constitution v7)
   # Used for display and future weighted correlation
