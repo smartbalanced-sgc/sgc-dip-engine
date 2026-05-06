@@ -35,6 +35,7 @@ portfolio:
     - LLY
     - LIN
     - WMT
+    - PLTR
   
   # Portfolio weights (Constitution v7)
   # Used for display and future weighted correlation
