@@ -39,6 +39,11 @@ portfolio:
     - AMD
     - INTC
     - SNDK
+    - ENGN
+    - AIIO
+    - GDC
+    - FWRD
+    - HUBS
   
   # Portfolio weights (Constitution v7)
   # Used for display and future weighted correlation
