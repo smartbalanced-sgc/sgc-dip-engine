@@ -2,11 +2,12 @@
 HTML Dashboard Generator — Session 3
 Creates the daily decision table with:
 - Collapsible warning banner (COLLAPSED by default, click to expand)
-- Backtest results section with description
+- Collapsible backtest results section (COLLAPSED by default, click to expand)
 - Post-earnings anchor suppression flags
 - Catalyst-aware date display
 - Currency-aware price display (€ for .MI tickers, $ for US, € for ASML)
 - Fallback signals (80th percentile high-conviction alternative)
+- Trading 212 ticker hyperlinks (opens in new tab)
 
 Sort: BUY first (shallowest dip = strongest buy), then WAIT (deepest dip first).
 """
@@ -25,6 +26,28 @@ def get_currency_symbol(ticker, portfolio_data=None):
         return '£'
     else:
         return '$'
+
+
+def get_trading212_url(ticker):
+    """
+    Build Trading 212 URL for a ticker.
+    Pattern: https://www.trading212.com/trading-instruments/invest/{TICKER}.{EXCHANGE}
+    Default suffix is .US for US-listed equities.
+    Add new exchange mappings here when adding non-US tickers.
+    """
+    # Exchange suffix mapping for non-US tickers
+    # Pattern: ticker as listed in config → Trading 212 path suffix
+    SUFFIX_MAP = {
+        'LDO.MI': 'LDO.IT',     # Milan
+        'IGLN.L': 'IGLN.GB',    # London — iShares Physical Gold ETC
+        'ASML':   'ASML.NL',    # Amsterdam-listed (we model USD ADR; T212 routes EU)
+        # Add more mappings here as portfolio expands:
+        # 'BARC.L': 'BARC.GB',
+        # 'FMNB.DE': 'FMNB.DE',
+    }
+    base = "https://www.trading212.com/trading-instruments/invest"
+    suffix = SUFFIX_MAP.get(ticker, f"{ticker}.US")
+    return f"{base}/{suffix}"
 
 
 def generate_html(execution_data, macro_regime, vix, portfolio_data,
@@ -61,7 +84,7 @@ def generate_html(execution_data, macro_regime, vix, portfolio_data,
         </div>
         """
 
-    # §Session 2: Backtest results section with description (collapsed by default)
+    # §Session 2: Backtest results section — COLLAPSED by default (click to expand)
     backtest_html = ""
     if backtest_results:
         if backtest_results.get('status') == 'insufficient_data':
@@ -71,9 +94,11 @@ def generate_html(execution_data, macro_regime, vix, portfolio_data,
             backtest_html = f"""
             <div class="backtest">
                 <details>
-                    <summary>📊 Backtest — Collecting data: {days_have}/{days_need} days — click to expand</summary>
-                    <h3>📊 Backtest <span class="bt-desc">— Tracks whether past WAIT signals correctly predicted actual dips</span></h3>
-                    <p class="backtest-pending">Collecting data: {days_have}/{days_need} days ({msg})</p>
+                    <summary>📊 BACKTEST — Collecting data: {days_have}/{days_need} days — click to expand</summary>
+                    <div class="bt-body">
+                        <p class="bt-desc-block">Tracks whether past WAIT signals correctly predicted actual dips.</p>
+                        <p class="backtest-pending">Collecting data: {days_have}/{days_need} days ({msg})</p>
+                    </div>
                 </details>
             </div>
             """
@@ -95,23 +120,25 @@ def generate_html(execution_data, macro_regime, vix, portfolio_data,
             backtest_html = f"""
             <div class="backtest">
                 <details>
-                    <summary>📊 Backtest — Hit rate {hit_rate:.0%} ({hits}/{total}) — click to expand</summary>
-                    <h3>📊 Backtest <span class="bt-desc">— Tracks whether past WAIT signals correctly predicted actual dips</span></h3>
-                    <div class="backtest-stats">
-                        <div class="bt-stat">
-                            <span class="bt-value">{hit_rate:.0%}</span>
-                            <span class="bt-label">Hit Rate ({hits}/{total})</span>
+                    <summary>📊 BACKTEST — Hit rate {hit_rate:.0%} ({hits}/{total}) — click to expand</summary>
+                    <div class="bt-body">
+                        <p class="bt-desc-block">Tracks whether past WAIT signals correctly predicted actual dips.</p>
+                        <div class="backtest-stats">
+                            <div class="bt-stat">
+                                <span class="bt-value">{hit_rate:.0%}</span>
+                                <span class="bt-label">Hit Rate ({hits}/{total})</span>
+                            </div>
+                            <div class="bt-stat">
+                                <span class="bt-value">{avg_error:+.1%}</span>
+                                <span class="bt-label">Avg Error</span>
+                            </div>
+                            <div class="bt-stat">
+                                <span class="bt-value">{roi_adv:+.1%}</span>
+                                <span class="bt-label">ROI vs Naive</span>
+                            </div>
                         </div>
-                        <div class="bt-stat">
-                            <span class="bt-value">{avg_error:+.1%}</span>
-                            <span class="bt-label">Avg Error</span>
-                        </div>
-                        <div class="bt-stat">
-                            <span class="bt-value">{roi_adv:+.1%}</span>
-                            <span class="bt-label">ROI vs Naive</span>
-                        </div>
+                        <p class="bt-calibration {cal_class}">{recommendation}</p>
                     </div>
-                    <p class="bt-calibration {cal_class}">{recommendation}</p>
                 </details>
             </div>
             """
@@ -214,9 +241,12 @@ def generate_html(execution_data, macro_regime, vix, portfolio_data,
                 </div>
             '''
 
+        # Trading 212 hyperlink for ticker (opens in new tab)
+        t212_url = get_trading212_url(ticker)
+
         table_rows += f"""
         <tr>
-            <td class="ticker">{ticker} {stock_warn}</td>
+            <td class="ticker"><a href="{t212_url}" target="_blank" rel="noopener noreferrer" class="ticker-link" title="Open {ticker} on Trading 212">{ticker}</a> {stock_warn}</td>
             <td>
                 <div class="signal-row">
                     <span class="signal-icon">{signal_icon}</span>
@@ -296,25 +326,19 @@ def generate_html(execution_data, macro_regime, vix, portfolio_data,
             background: #1a2535; border: 1px solid #4a9eff; border-radius: 12px;
             padding: 15px 20px; margin-bottom: 20px;
         }}
-        .backtest h3 {{ color: #4a9eff; margin-bottom: 12px; font-size: 1em; }}
-
-        .backtest details summary {
+        .backtest details summary {{
             color: #4a9eff; font-weight: 600; font-size: 1em;
             cursor: pointer; list-style: none; padding: 2px 0;
-            margin-bottom: 10px;
-        }
-        .backtest details summary::-webkit-details-marker { display: none; }
-        .backtest details summary::before {
+        }}
+        .backtest details summary::-webkit-details-marker {{ display: none; }}
+        .backtest details summary::before {{
             content: '▶ '; font-size: 0.8em;
-        }
-        .backtest details[open] summary::before {
+        }}
+        .backtest details[open] summary::before {{
             content: '▼ ';
-        }
-        .backtest details[open] summary {
-            margin-bottom: 0;
-        }
-        .backtest details > h3 { display: none; } /* hide inner h3 — summary replaces it */
-        
+        }}
+        .bt-body {{ padding-top: 12px; }}
+        .bt-desc-block {{ color: #a0a5b0; font-size: 0.85em; margin-bottom: 10px; font-style: italic; }}
         .bt-desc {{ color: #a0a5b0; font-weight: 400; font-size: 0.85em; }}
         .backtest-stats {{ display: flex; gap: 30px; margin-bottom: 10px; }}
         .bt-stat {{ text-align: center; }}
@@ -349,6 +373,14 @@ def generate_html(execution_data, macro_regime, vix, portfolio_data,
         td {{ padding: 20px 15px; vertical-align: top; }}
 
         .ticker {{ font-weight: 700; font-size: 1.1em; color: #4a9eff; }}
+        .ticker-link {{
+            color: inherit; text-decoration: none;
+            border-bottom: 1px dashed #4a9eff66;
+            transition: color 0.15s, border-color 0.15s;
+        }}
+        .ticker-link:hover {{
+            color: #6db5ff; border-bottom-color: #6db5ff;
+        }}
         .signal-row {{ display: flex; align-items: center; gap: 8px; margin-bottom: 8px; }}
         .signal-icon {{ font-size: 1.3em; }}
         .signal-text {{ font-weight: 700; font-size: 1.1em; }}
