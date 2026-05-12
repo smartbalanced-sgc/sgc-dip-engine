@@ -61,16 +61,20 @@ def generate_html(execution_data, macro_regime, vix, portfolio_data,
         </div>
         """
 
-    # §Session 2: Backtest results section with description
+    # §Session 2: Backtest results section with description (collapsed by default)
     backtest_html = ""
     if backtest_results:
         if backtest_results.get('status') == 'insufficient_data':
             days_have = backtest_results.get('days_available', 0)
             days_need = backtest_results.get('days_needed', 14)
+            msg = backtest_results.get('message', f'need {days_need - days_have} more')
             backtest_html = f"""
             <div class="backtest">
-                <h3>📊 Backtest <span class="bt-desc">— Tracks whether past WAIT signals correctly predicted actual dips</span></h3>
-                <p class="backtest-pending">Collecting data: {days_have}/{days_need} days ({backtest_results.get('message', f'need {days_need - days_have} more')})</p>
+                <details>
+                    <summary>📊 Backtest — Collecting data: {days_have}/{days_need} days — click to expand</summary>
+                    <h3>📊 Backtest <span class="bt-desc">— Tracks whether past WAIT signals correctly predicted actual dips</span></h3>
+                    <p class="backtest-pending">Collecting data: {days_have}/{days_need} days ({msg})</p>
+                </details>
             </div>
             """
         elif backtest_results.get('status') == 'complete':
@@ -90,22 +94,25 @@ def generate_html(execution_data, macro_regime, vix, portfolio_data,
 
             backtest_html = f"""
             <div class="backtest">
-                <h3>📊 Backtest <span class="bt-desc">— Tracks whether past WAIT signals correctly predicted actual dips</span></h3>
-                <div class="backtest-stats">
-                    <div class="bt-stat">
-                        <span class="bt-value">{hit_rate:.0%}</span>
-                        <span class="bt-label">Hit Rate ({hits}/{total})</span>
+                <details>
+                    <summary>📊 Backtest — Hit rate {hit_rate:.0%} ({hits}/{total}) — click to expand</summary>
+                    <h3>📊 Backtest <span class="bt-desc">— Tracks whether past WAIT signals correctly predicted actual dips</span></h3>
+                    <div class="backtest-stats">
+                        <div class="bt-stat">
+                            <span class="bt-value">{hit_rate:.0%}</span>
+                            <span class="bt-label">Hit Rate ({hits}/{total})</span>
+                        </div>
+                        <div class="bt-stat">
+                            <span class="bt-value">{avg_error:+.1%}</span>
+                            <span class="bt-label">Avg Error</span>
+                        </div>
+                        <div class="bt-stat">
+                            <span class="bt-value">{roi_adv:+.1%}</span>
+                            <span class="bt-label">ROI vs Naive</span>
+                        </div>
                     </div>
-                    <div class="bt-stat">
-                        <span class="bt-value">{avg_error:+.1%}</span>
-                        <span class="bt-label">Avg Error</span>
-                    </div>
-                    <div class="bt-stat">
-                        <span class="bt-value">{roi_adv:+.1%}</span>
-                        <span class="bt-label">ROI vs Naive</span>
-                    </div>
-                </div>
-                <p class="bt-calibration {cal_class}">{recommendation}</p>
+                    <p class="bt-calibration {cal_class}">{recommendation}</p>
+                </details>
             </div>
             """
 
@@ -290,6 +297,24 @@ def generate_html(execution_data, macro_regime, vix, portfolio_data,
             padding: 15px 20px; margin-bottom: 20px;
         }}
         .backtest h3 {{ color: #4a9eff; margin-bottom: 12px; font-size: 1em; }}
+
+        .backtest details summary {
+            color: #4a9eff; font-weight: 600; font-size: 1em;
+            cursor: pointer; list-style: none; padding: 2px 0;
+            margin-bottom: 10px;
+        }
+        .backtest details summary::-webkit-details-marker { display: none; }
+        .backtest details summary::before {
+            content: '▶ '; font-size: 0.8em;
+        }
+        .backtest details[open] summary::before {
+            content: '▼ ';
+        }
+        .backtest details[open] summary {
+            margin-bottom: 0;
+        }
+        .backtest details > h3 { display: none; } /* hide inner h3 — summary replaces it */
+        
         .bt-desc {{ color: #a0a5b0; font-weight: 400; font-size: 0.85em; }}
         .backtest-stats {{ display: flex; gap: 30px; margin-bottom: 10px; }}
         .bt-stat {{ text-align: center; }}
