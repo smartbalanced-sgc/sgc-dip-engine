@@ -3,6 +3,7 @@ HTML Dashboard Generator — Session 3
 Creates the daily decision table with:
 - Collapsible warning banner (COLLAPSED by default, click to expand)
 - Collapsible backtest results section (COLLAPSED by default, click to expand)
+- Per-ticker hit rate buckets (Strong / Medium / Weak / Insufficient)
 - Post-earnings anchor suppression flags
 - Catalyst-aware date display
 - Currency-aware price display (€ for .MI tickers, $ for US, € for ASML)
@@ -16,6 +17,13 @@ from datetime import datetime, timedelta
 from pytz import timezone
 import os
 from config import OUTPUT_DIR, OUTPUT_FILE, PERCENTILE_TARGET
+
+
+# Per-ticker bucket display thresholds
+# Rationale: tickers with <3 testable signals cannot support ranked accuracy
+# claims — small samples (n<3) are within margin of error and would mislead.
+# Tickers with >=3 signals are bucketed by hit rate into Strong/Medium/Weak.
+MIN_TICKER_SAMPLE = 3
 
 
 def get_currency_symbol(ticker, portfolio_data=None):
@@ -48,6 +56,44 @@ def get_trading212_url(ticker):
     base = "https://www.trading212.com/trading-instruments/invest"
     suffix = SUFFIX_MAP.get(ticker, f"{ticker}.US")
     return f"{base}/{suffix}"
+
+
+def _bucket_tickers(by_ticker):
+    """
+    Bucket tickers by hit rate accuracy.
+
+    Returns: (strong, medium, weak, insufficient) — four lists of formatted labels.
+    Rationale: small samples (n<MIN_TICKER_SAMPLE) cannot support ranked accuracy
+    claims. Tickers with >=MIN_TICKER_SAMPLE signals are grouped by hit rate.
+    Within buckets: sorted by hit rate desc, then sample size desc.
+    """
+    strong, medium, weak, insufficient = [], [], [], []
+    for t, stats in by_ticker.items():
+        n = stats.get('signals', 0)
+        if n < MIN_TICKER_SAMPLE:
+            insufficient.append(t)
+            continue
+        hr = stats.get('hit_rate', 0)
+        label = f"{t} {hr:.0%} ({stats['hits']}/{n})"
+        if hr >= 0.75:
+            strong.append((hr, n, label))
+        elif hr >= 0.50:
+            medium.append((hr, n, label))
+        else:
+            weak.append((hr, n, label))
+
+    # Sort each ranked bucket: hit rate desc, then sample size desc
+    strong.sort(key=lambda x: (-x[0], -x[1]))
+    medium.sort(key=lambda x: (-x[0], -x[1]))
+    weak.sort(key=lambda x: (-x[0], -x[1]))
+    insufficient.sort()
+
+    return (
+        [x[2] for x in strong],
+        [x[2] for x in medium],
+        [x[2] for x in weak],
+        insufficient,
+    )
 
 
 def generate_html(execution_data, macro_regime, vix, portfolio_data,
@@ -117,6 +163,15 @@ def generate_html(execution_data, macro_regime, vix, portfolio_data,
             elif calibration in ('overconfident', 'underconfident'):
                 cal_class = 'cal-warn'
 
+            # Per-ticker bucket display (Strong / Medium / Weak / Insufficient)
+            by_ticker = backtest_results.get('by_ticker', {})
+            strong, medium, weak, insufficient = _bucket_tickers(by_ticker)
+
+            strong_html = ' · '.join(strong) if strong else '<span class="bt-none">none</span>'
+            medium_html = ' · '.join(medium) if medium else '<span class="bt-none">none</span>'
+            weak_html = ' · '.join(weak) if weak else '<span class="bt-none">none</span>'
+            insuff_html = ', '.join(insufficient) if insufficient else 'none'
+
             backtest_html = f"""
             <div class="backtest">
                 <details>
@@ -138,6 +193,13 @@ def generate_html(execution_data, macro_regime, vix, portfolio_data,
                             </div>
                         </div>
                         <p class="bt-calibration {cal_class}">{recommendation}</p>
+                        <div class="bt-tickers">
+                            <p class="bt-tickers-header">Hit rate by ticker <span class="bt-note">— minimum {MIN_TICKER_SAMPLE} signals required for ranking</span></p>
+                            <div class="bt-bucket"><span class="bt-tag bt-tag-strong">STRONG ≥75%</span> {strong_html}</div>
+                            <div class="bt-bucket"><span class="bt-tag bt-tag-medium">MEDIUM 50-74%</span> {medium_html}</div>
+                            <div class="bt-bucket"><span class="bt-tag bt-tag-weak">WEAK &lt;50%</span> {weak_html}</div>
+                            <div class="bt-bucket bt-bucket-insuff"><span class="bt-tag bt-tag-insuff">INSUFFICIENT &lt;{MIN_TICKER_SAMPLE} signals</span> {insuff_html}</div>
+                        </div>
                     </div>
                 </details>
             </div>
@@ -349,6 +411,22 @@ def generate_html(execution_data, macro_regime, vix, portfolio_data,
         .cal-warn {{ color: #ffa726; }}
         .backtest-pending {{ color: #a0a5b0; font-size: 0.9em; }}
 
+        .bt-tickers {{ margin-top: 16px; padding-top: 12px; border-top: 1px solid #2d3548; }}
+        .bt-tickers-header {{ font-size: 0.85em; color: #a0a5b0; margin-bottom: 10px; font-weight: 600; }}
+        .bt-note {{ color: #707580; font-weight: 400; font-style: italic; }}
+        .bt-bucket {{ font-size: 0.85em; color: #b0b5c0; padding: 6px 0; line-height: 1.7; }}
+        .bt-bucket-insuff {{ color: #707580; }}
+        .bt-tag {{
+            display: inline-block; padding: 2px 8px; border-radius: 4px;
+            font-size: 0.75em; font-weight: 700; margin-right: 8px;
+            letter-spacing: 0.5px;
+        }}
+        .bt-tag-strong {{ background: #1a3a1a; color: #66bb6a; }}
+        .bt-tag-medium {{ background: #3a2d1a; color: #ffa726; }}
+        .bt-tag-weak {{ background: #4a1a1a; color: #ff6b6b; }}
+        .bt-tag-insuff {{ background: #2d3548; color: #909598; }}
+        .bt-none {{ color: #707580; font-style: italic; }}
+
         .deployment {{
             background: #1a1f35; padding: 20px; border-radius: 12px;
             margin-bottom: 30px; border-left: 4px solid #4a9eff;
@@ -412,6 +490,7 @@ def generate_html(execution_data, macro_regime, vix, portfolio_data,
         @media (max-width: 768px) {{
             .deployment-row {{ flex-direction: column; gap: 10px; }}
             .backtest-stats {{ flex-direction: column; gap: 10px; }}
+            .bt-bucket {{ font-size: 0.8em; }}
         }}
     </style>
 </head>
