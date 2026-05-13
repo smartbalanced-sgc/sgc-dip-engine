@@ -12,7 +12,7 @@ from datetime import datetime
 from pathlib import Path
 
 
-def archive_signals(execution_data, portfolio_data):
+def archive_signals(execution_data, portfolio_data, regime_results=None):
     """
     Write today's signals to signal_history.csv.
     If today's signals already exist, replace them (dedup).
@@ -20,6 +20,8 @@ def archive_signals(execution_data, portfolio_data):
     Args:
         execution_data: Dict of {ticker: {signal, dip_target, ...}}
         portfolio_data: Dict of {ticker: {current_price, rsi, earnings_date, ...}}
+        regime_results: Dict of {ticker: {regime, confidence, ...}} from regime_classifier
+                       (May 13: persisted for future backtest analysis)
 
     Returns:
         int: Number of signals archived
@@ -41,6 +43,7 @@ def archive_signals(execution_data, portfolio_data):
     csv_path = data_dir / 'signal_history.csv'
     today = datetime.now().strftime('%Y-%m-%d')
 
+    # §May 13: Added trade_regime and regime_overrode columns for backtest analysis
     headers = [
         'date',
         'ticker',
@@ -52,7 +55,11 @@ def archive_signals(execution_data, portfolio_data):
         'rsi',
         'earnings_days',
         'regime',
-        'validation_flags'
+        'validation_flags',
+        'trade_regime',           # NORMAL/MOMENTUM/SQUEEZE_RISK/OVERSOLD_REVERSAL/BREAKDOWN
+        'regime_confidence',      # 0.0 to 1.0
+        'regime_overrode',        # True if regime suppressed/boosted the original signal
+        'original_signal',        # The signal before regime modulation (empty if not overrode)
     ]
 
     # §Session 2: Read existing rows, remove today's entries (dedup)
@@ -97,6 +104,12 @@ def archive_signals(execution_data, portfolio_data):
         regime = port_data.get('regime', '')
         validation_flags = '|'.join(port_data.get('_validation_flags', []))
 
+        # §May 13: Regime classifier fields (from execution_data, populated by execution_logic)
+        trade_regime = exec_data.get('regime', 'NORMAL')
+        regime_confidence = exec_data.get('regime_confidence', 0.0)
+        regime_overrode = exec_data.get('regime_overrode', False)
+        original_signal = exec_data.get('regime_original_signal') or ''
+
         today_rows.append({
             'date': today,
             'ticker': ticker,
@@ -108,14 +121,19 @@ def archive_signals(execution_data, portfolio_data):
             'rsi': f"{rsi:.1f}" if rsi else '',
             'earnings_days': earnings_days,
             'regime': regime,
-            'validation_flags': validation_flags
+            'validation_flags': validation_flags,
+            'trade_regime': trade_regime,
+            'regime_confidence': f"{regime_confidence:.2f}",
+            'regime_overrode': 'true' if regime_overrode else 'false',
+            'original_signal': original_signal,
         })
 
     # Write all rows: existing (minus today) + today's fresh rows
+    # §May 13: Older rows may lack the new columns — CSV DictWriter handles by using empty strings
     all_rows = existing_rows + today_rows
 
     with open(csv_path, 'w', newline='') as f:
-        writer = csv.DictWriter(f, fieldnames=headers)
+        writer = csv.DictWriter(f, fieldnames=headers, extrasaction='ignore')
         writer.writeheader()
         for row in all_rows:
             writer.writerow(row)

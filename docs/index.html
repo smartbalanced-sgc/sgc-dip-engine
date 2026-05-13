@@ -81,6 +81,22 @@
         .cal-warn { color: #ffa726; }
         .backtest-pending { color: #a0a5b0; font-size: 0.9em; }
 
+        .bt-tickers { margin-top: 16px; padding-top: 12px; border-top: 1px solid #2d3548; }
+        .bt-tickers-header { font-size: 0.85em; color: #a0a5b0; margin-bottom: 10px; font-weight: 600; }
+        .bt-note { color: #707580; font-weight: 400; font-style: italic; }
+        .bt-bucket { font-size: 0.85em; color: #b0b5c0; padding: 6px 0; line-height: 1.7; }
+        .bt-bucket-insuff { color: #707580; }
+        .bt-tag {
+            display: inline-block; padding: 2px 8px; border-radius: 4px;
+            font-size: 0.75em; font-weight: 700; margin-right: 8px;
+            letter-spacing: 0.5px;
+        }
+        .bt-tag-strong { background: #1a3a1a; color: #66bb6a; }
+        .bt-tag-medium { background: #3a2d1a; color: #ffa726; }
+        .bt-tag-weak { background: #4a1a1a; color: #ff6b6b; }
+        .bt-tag-insuff { background: #2d3548; color: #909598; }
+        .bt-none { color: #707580; font-style: italic; }
+
         .deployment {
             background: #1a1f35; padding: 20px; border-radius: 12px;
             margin-bottom: 30px; border-left: 4px solid #4a9eff;
@@ -126,6 +142,17 @@
         }
         .earnings { text-align: center; font-weight: 500; }
 
+        .explainer {
+            background: #1a1f2e; border: 1px solid #2d3548;
+            border-radius: 6px; padding: 10px 14px; margin: 12px 0;
+        }
+        .explainer summary {
+            cursor: pointer; color: #88a0c8; font-weight: 600;
+            font-size: 0.9em; padding: 2px 0;
+        }
+        .explainer-body { padding-top: 8px; color: #c0c5d0; font-size: 0.88em; }
+        .explainer-body p { margin: 6px 0; line-height: 1.5; }
+        .explainer-body strong { color: #d4dae0; }
         .stock-warn { margin-left: 5px; }
         .rsi {
             font-size: 0.75em; padding: 2px 8px; border-radius: 4px;
@@ -133,6 +160,26 @@
         }
         .rsi-high { background: #4a1a1a; color: #ff6b6b; }
         .rsi-low { background: #1a3a1a; color: #66bb6a; }
+
+        /* §May 13: Regime classifier badges */
+        .regime-badge {
+            font-size: 0.7em; padding: 2px 8px; border-radius: 4px;
+            margin-left: 8px; font-weight: 700; letter-spacing: 0.5px;
+            cursor: help;
+        }
+        .regime-momentum { background: #3a2d1a; color: #ffa726; }
+        .regime-squeeze { background: #4a1a1a; color: #ff6b6b; }
+        .regime-oversold { background: #1a3a3a; color: #4ade80; }
+        .regime-breakdown { background: #1a1a2d; color: #a0a5b0; }
+        .regime-normal { background: #2d3548; color: #a0a5b0; }
+        .regime-note {
+            background: #1f1a0a; border-left: 3px solid #ffa726;
+            padding: 6px 10px; margin-top: 8px; border-radius: 4px;
+            font-size: 0.82em; color: #c0b090;
+        }
+        .regime-note-prefix {
+            color: #ffa726; font-weight: 700; letter-spacing: 0.5px;
+        }
 
         .run-btn {
             display: inline-block; padding: 6px 18px; background: #4a9eff;
@@ -144,6 +191,7 @@
         @media (max-width: 768px) {
             .deployment-row { flex-direction: column; gap: 10px; }
             .backtest-stats { flex-direction: column; gap: 10px; }
+            .bt-bucket { font-size: 0.8em; }
         }
     </style>
 </head>
@@ -152,11 +200,11 @@
         <div class="header">
             <h1>SGC DIP ENGINE</h1>
             <div class="meta">
-                Last Run: May 12, 2026 10:02 PM BST
-                <span class="regime">Market: NEUTRAL (VIX 18.0)</span>
+                Last Run: May 13, 2026 01:39 PM BST
+                <span class="regime">Market: NEUTRAL (VIX 17.9)</span>
             </div>
             <div class="meta" style="margin-top: 8px;">
-                Window: 60 days remaining (ends Jul 11, 2026)
+                Window: 60 days remaining (ends Jul 12, 2026)
             </div>
             <div style="margin-top: 12px;">
                 <a href="https://github.com/smartbalanced-sgc/sgc-dip-engine/actions" target="_blank" class="run-btn">▶ Run Now</a>
@@ -166,17 +214,17 @@
         
         <div class="warnings">
             <details>
-                <summary>⚠️ DATA QUALITY WARNINGS (35) — click to expand</summary>
-                <ul><li>GOOGL: Model $132 vs market $387. Model broken OR stock overvalued. Using analyst targets.</li>
-<li>META: Model $287 vs market $603. Model broken OR stock overvalued. Using analyst targets.</li>
-<li>AMZN: Model $86 vs market $266. Model broken OR stock overvalued. Using analyst targets.</li>
-<li>ASML: Model $364 vs market $1289. Model broken OR stock overvalued. Using analyst targets.</li>
+                <summary>⚠️ DATA QUALITY WARNINGS (39) — click to expand</summary>
+                <ul><li>GOOGL: Model $131 vs market $387. Model broken OR stock overvalued. Using analyst targets.</li>
+<li>META: Model $284 vs market $603. Model broken OR stock overvalued. Using analyst targets.</li>
+<li>AMZN: Model $81 vs market $266. Model broken OR stock overvalued. Using analyst targets.</li>
+<li>ASML: Model $362 vs market $1300. Model broken OR stock overvalued. Using analyst targets.</li>
 <li>AVGO: 24% single-day move. Real event OR data corrupted. Included in volatility.</li>
-<li>AVGO: Model $204 vs market $419. Model broken OR stock overvalued. Using analyst targets.</li>
+<li>AVGO: Model $202 vs market $419. Model broken OR stock overvalued. Using analyst targets.</li>
 <li>VST: 28% single-day move. Real event OR data corrupted. Included in volatility.</li>
 <li>VST: Model $17 vs market $147. Model broken OR stock overvalued. Using analyst targets.</li>
 <li>CEG: 3 moves over 20% (max 25%). Real volatility OR data corrupted. Check quality.</li>
-<li>LDO.MI: Candle data 35 days old (last: 2026-04-07) but current price is FRESH from profile. Proceeding with caution.</li>
+<li>LDO.MI: Candle data 36 days old (last: 2026-04-07) but current price is FRESH from profile. Proceeding with caution.</li>
 <li>IGLN.L: No current price — SKIPPED</li>
 <li>TSLA: 2 moves over 20% (max 23%). Real volatility OR data corrupted. Check quality.</li>
 <li>TSLA: Model $19 vs market $433. Model broken OR stock overvalued. Using analyst targets.</li>
@@ -194,53 +242,86 @@
 <li>AIIO: 38 moves over 20% (max 76%). Real volatility OR data corrupted. Check quality.</li>
 <li>GDC: 23 moves over 20% (max 128%). Real volatility OR data corrupted. Check quality.</li>
 <li>FWRD: 6 moves over 20% (max 43%). Real volatility OR data corrupted. Check quality.</li>
+<li>HUBS: Model $90 vs market $180. Model broken OR stock overvalued. Using analyst targets.</li>
+<li>CRWD: Model $18 vs market $546. Model broken OR stock overvalued. Using analyst targets.</li>
+<li>RR.GB: No current price — SKIPPED</li>
+<li>BARC.GB: No current price — SKIPPED</li>
 <li>NOTE: Growth stocks often show DCF warnings (AI premium vs traditional model). System uses analyst consensus instead.</li>
 <li>NOTE: Power sector stocks have binary catalysts (PPA wins, reactor restarts, regulation). Large moves are normal for this role.</li>
-<li>1 stock(s) skipped, 30 valid</li>
+<li>3 stock(s) skipped, 31 valid</li>
 <li>INOD: Vol 195% (>150% limit). Too wild to model — excluded.</li>
 <li>AIIO: Vol 181% (>150% limit). Too wild to model — excluded.</li>
-<li>FWRD: Vol 229% (>150% limit). Too wild to model — excluded.</li>
+<li>FWRD: Vol 227% (>150% limit). Too wild to model — excluded.</li>
 <li>ENGN: Anchor $7.05 (MA50) is 4.9x price. Too extreme — using current price instead.</li>
 <li>GDC: Anchor $3.25 (MA50) is 23.1x price. Too extreme — using current price instead.</li></ul>
             </details>
         </div>
         
+        
+        <div class="explainer">
+            <details>
+                <summary>ℹ️ How to read Dip / Rally conviction — click to expand</summary>
+                <div class="explainer-body">
+                    <p><strong>Dip conviction (e.g. 70%):</strong> the % of simulated 60-day paths
+                       where the stock touched the dip price or lower at SOME point during the window.
+                       Used for setting limit buys at expected lows.</p>
+                    <p><strong>Rally conviction (e.g. 60%):</strong> the % of simulated paths where the
+                       stock touched the rally price or higher at SOME point during the window.
+                       Used for setting take-profit alerts.</p>
+                    <p><strong>Why can they add to more than 100%?</strong> Both percentages measure
+                       OVERLAPPING subsets of the same paths — a single path can both dip deeply
+                       <em>and</em> rally high within 60 days. Measurements are independent, not mutually exclusive.</p>
+                    <p><strong>How does ⚠️ regime override work?</strong> When the regime classifier flags
+                       a stock as MOMENTUM, SQUEEZE_RISK, or BREAKDOWN, the dip target is annotated
+                       as "unlikely to fill" because Monte Carlo's historical-volatility assumption
+                       isn't valid in those regimes. Trust the regime warning over the dip prediction.</p>
+                </div>
+            </details>
+        </div>
+    
 
         
             <div class="backtest">
                 <details>
-                    <summary>📊 BACKTEST — Hit rate 71% (32/45) — click to expand</summary>
+                    <summary>📊 BACKTEST — Hit rate 68% (38/56) — click to expand</summary>
                     <div class="bt-body">
                         <p class="bt-desc-block">Tracks whether past WAIT signals correctly predicted actual dips.</p>
                         <div class="backtest-stats">
                             <div class="bt-stat">
-                                <span class="bt-value">71%</span>
-                                <span class="bt-label">Hit Rate (32/45)</span>
+                                <span class="bt-value">68%</span>
+                                <span class="bt-label">Hit Rate (38/56)</span>
                             </div>
                             <div class="bt-stat">
-                                <span class="bt-value">+0.0%</span>
+                                <span class="bt-value">+0.1%</span>
                                 <span class="bt-label">Avg Error</span>
                             </div>
                             <div class="bt-stat">
-                                <span class="bt-value">+6.6%</span>
+                                <span class="bt-value">+6.3%</span>
                                 <span class="bt-label">ROI vs Naive</span>
                             </div>
                         </div>
-                        <p class="bt-calibration cal-warn">Raise PERCENTILE_TARGET (hit rate 71% above 65% target)</p>
+                        <p class="bt-calibration cal-warn">Raise PERCENTILE_TARGET (hit rate 68% above 65% target)</p>
+                        <div class="bt-tickers">
+                            <p class="bt-tickers-header">Hit rate by ticker <span class="bt-note">— minimum 3 signals required for ranking</span></p>
+                            <div class="bt-bucket"><span class="bt-tag bt-tag-strong">STRONG ≥75%</span> NVDA 100% (5/5) · MSFT 100% (5/5) · META 100% (5/5) · VST 100% (5/5) · MA 100% (3/3) · WM 100% (3/3)</div>
+                            <div class="bt-bucket"><span class="bt-tag bt-tag-medium">MEDIUM 50-74%</span> CEG 60% (3/5) · GOOGL 50% (2/4)</div>
+                            <div class="bt-bucket"><span class="bt-tag bt-tag-weak">WEAK &lt;50%</span> AMZN 40% (2/5) · ASML 40% (2/5) · AVGO 40% (2/5) · MU 0% (0/5)</div>
+                            <div class="bt-bucket bt-bucket-insuff"><span class="bt-tag bt-tag-insuff">INSUFFICIENT &lt;3 signals</span> CTAS</div>
+                        </div>
                     </div>
                 </details>
             </div>
             
 
         <div class="deployment">
-            <h2>TODAY'S DEPLOYMENT (May 12)</h2>
+            <h2>TODAY'S DEPLOYMENT (May 13)</h2>
             <div class="deployment-row">
                 <strong>BUY TODAY (3):</strong>
                 <span class="buy-list">WM, CTAS, LIN</span>
             </div>
             <div class="deployment-row">
-                <strong>WAIT FOR DIP (24):</strong>
-                <span class="wait-list">NVDA, MSFT, GOOGL, META, AMZN, MA, MU, ASML, AVGO, VST, CEG, LDO.MI, TSLA, ADP, V, LLY, WMT, PLTR, AMD, INTC, SNDK, ENGN, GDC, HUBS</span>
+                <strong>WAIT FOR DIP (25):</strong>
+                <span class="wait-list">NVDA, MSFT, GOOGL, META, AMZN, MA, MU, ASML, AVGO, VST, CEG, LDO.MI, TSLA, ADP, V, LLY, WMT, PLTR, AMD, INTC, SNDK, ENGN, GDC, HUBS, CRWD</span>
             </div>
         </div>
 
@@ -261,12 +342,14 @@
                     <span class="signal-icon">🟢</span>
                     <span class="signal-text">BUY</span>
                     <span class="rsi ">RSI 34</span>
+                    
                 </div>
                 <div class="price-row">$165.42 (today)</div>
-                <div class="target-row">⬇️ $161.66 · May 30-Jun 13 (2.3% — immaterial)</div>
-                <div class="target-row" style="color: #4ade80;">⬆️ $173.52 · May 23-Jun 06 (+4.9% rally, 60% conviction)</div>
+                <div class="target-row">⬇️ $161.46 · May 31-Jun 14 (2.4% — immaterial)</div>
+                <div class="target-row" style="color: #4ade80;">⬆️ $173.21 · May 23-Jun 06 (+4.7% rally, 60% conviction)</div>
                 <div class="confidence-row"> Dip conviction: 70%</div>
-                <div class="oneliner">Expected dip only 2.3% — not worth waiting. Buy today.</div>
+                <div class="oneliner">Expected dip only 2.4% — not worth waiting. Buy today.</div>
+                
                 
                 
                 <div class="consensus-row">🔮 Analyst consensus (12-mo): $236.50 median (+43.0%)</div>
@@ -281,12 +364,14 @@
                     <span class="signal-icon">🟢</span>
                     <span class="signal-text">BUY</span>
                     <span class="rsi ">RSI 53</span>
+                    
                 </div>
                 <div class="price-row">$503.87 (today)</div>
-                <div class="target-row">⬇️ $489.64 · Jun 04-18 (2.8% — immaterial)</div>
-                <div class="target-row" style="color: #4ade80;">⬆️ $524.89 · May 20-Jun 03 (+4.2% rally, 60% conviction)</div>
+                <div class="target-row">⬇️ $489.89 · Jun 03-17 (2.8% — immaterial)</div>
+                <div class="target-row" style="color: #4ade80;">⬆️ $525.22 · May 21-Jun 04 (+4.2% rally, 60% conviction)</div>
                 <div class="confidence-row"> Dip conviction: 70%</div>
                 <div class="oneliner">Expected dip only 2.8% — not worth waiting. Buy today.</div>
+                
                 
                 
                 <div class="consensus-row">🔮 Analyst consensus (12-mo): $570.00 median (+13.1%); Trend: → stable</div>
@@ -301,12 +386,14 @@
                     <span class="signal-icon">🟢</span>
                     <span class="signal-text">BUY</span>
                     <span class="rsi ">RSI 39</span>
+                    
                 </div>
                 <div class="price-row">$217.65 (today)</div>
-                <div class="target-row">⬇️ $211.25 · Jun 01-15 (2.9% — immaterial)</div>
-                <div class="target-row" style="color: #4ade80;">⬆️ $229.55 · May 22-Jun 05 (+5.5% rally, 60% conviction)</div>
+                <div class="target-row">⬇️ $211.44 · Jun 02-16 (2.9% — immaterial)</div>
+                <div class="target-row" style="color: #4ade80;">⬆️ $229.41 · May 22-Jun 05 (+5.4% rally, 60% conviction)</div>
                 <div class="confidence-row"> Dip conviction: 70%</div>
                 <div class="oneliner">Expected dip only 2.9% — not worth waiting. Buy today.</div>
+                
                 
                 
                 <div class="consensus-row">🔮 Analyst consensus (12-mo): $258.00 median (+18.5%)</div>
@@ -321,17 +408,15 @@
                     <span class="signal-icon">⏳</span>
                     <span class="signal-text">WAIT</span>
                     <span class="rsi ">RSI 31</span>
+                    <span class="regime-badge regime-breakdown" title="Breakdown — no reversal signal yet, dip-buy invalid until RSI>45 and 20d momentum positive. Drawdown -97.6% + 20d -95.9% + RSI 31 weak">📉 BREAKDOWN 75%</span>
                 </div>
                 <div class="price-row">$0.14 (today)</div>
-                <div class="target-row">⬇️ $0.11 · Jun 03-17 (24.0%)</div>
-                <div class="target-row" style="color: #4ade80;">⬆️ $0.21 · May 20-Jun 03 (+51.7% rally, 60% conviction)</div>
+                <div class="target-row">⬇️ $0.11 · Jun 04-18 (24.9% — ⚠️ regime override: unlikely to fill)</div>
+                <div class="target-row" style="color: #4ade80;">⬆️ $0.21 · May 21-Jun 04 (+52.5% rally, 60% conviction)</div>
                 <div class="confidence-row"> Dip conviction: 70%</div>
-                <div class="oneliner">Deep 24.0% dip expected (70% conviction). Hold firm. Wait.</div>
+                <div class="oneliner">Deep 24.9% dip expected (70% conviction). Hold firm. Wait.</div>
+                <div class="regime-note"><span class="regime-note-prefix">REGIME:</span> Breakdown — no reversal signal yet, dip-buy invalid until RSI>45 and 20d momentum positive. Drawdown -97.6% + 20d -95.9% + RSI 31 weak</div>
                 
-                <div style="font-size: 13px; color: #888; margin-top: 8px; padding-left: 16px; border-left: 2px solid #444;">
-                    └─ Fallback: BUY at $0.12 (14.9% dip, 80% conviction) May 11-25
-                </div>
-            
                 
                 <div class="consensus-row"></div>
             </td>
@@ -345,15 +430,17 @@
                     <span class="signal-icon">⏳</span>
                     <span class="signal-text">WAIT</span>
                     <span class="rsi rsi-low">RSI 22</span>
+                    <span class="regime-badge regime-oversold" title="Oversold reversal — high-conviction setup. RSI 22 oversold + drawdown -86.4% + volume 2.2x">💎 OVERSOLD 75%</span>
                 </div>
                 <div class="price-row">$1.44 (today)</div>
-                <div class="target-row">⬇️ $1.17 · likely around earnings (Jun 11) (19.1%)</div>
-                <div class="target-row" style="color: #4ade80;">⬆️ $1.94 · May 22-Jun 05 (+35.0% rally, 60% conviction)</div>
+                <div class="target-row">⬇️ $1.17 · likely around earnings (Jun 11) (18.9%)</div>
+                <div class="target-row" style="color: #4ade80;">⬆️ $1.94 · May 23-Jun 06 (+34.9% rally, 60% conviction)</div>
                 <div class="confidence-row"> Dip conviction: 70%</div>
-                <div class="oneliner">Deep 19.1% dip expected (70% conviction). Hold firm. Wait.</div>
+                <div class="oneliner">Deep 18.9% dip expected (70% conviction). Hold firm. Wait.</div>
+                <div class="regime-note"><span class="regime-note-prefix">REGIME:</span> Oversold reversal — high-conviction setup. RSI 22 oversold + drawdown -86.4% + volume 2.2x</div>
                 
                 <div style="font-size: 13px; color: #888; margin-top: 8px; padding-left: 16px; border-left: 2px solid #444;">
-                    └─ Fallback: BUY at $1.28 (11.3% dip, 80% conviction) May 12-26
+                    └─ Fallback: BUY at $1.28 (11.4% dip, 80% conviction) May 12-26
                 </div>
             
                 
@@ -369,17 +456,15 @@
                     <span class="signal-icon">⏳</span>
                     <span class="signal-text">WAIT</span>
                     <span class="rsi ">RSI 32</span>
+                    <span class="regime-badge regime-breakdown" title="Breakdown — no reversal signal yet, dip-buy invalid until RSI>45 and 20d momentum positive. Drawdown -39.4% + 20d -13.0% + RSI 32 weak">📉 BREAKDOWN 75%</span>
                 </div>
                 <div class="price-row">$179.58 (today)</div>
-                <div class="target-row">⬇️ $146.19 · Jun 05-19 (18.6%)</div>
-                <div class="target-row" style="color: #4ade80;">⬆️ $234.83 · May 19-Jun 02 (+30.8% rally, 60% conviction)</div>
+                <div class="target-row">⬇️ $145.71 · Jun 05-19 (18.9% — ⚠️ regime override: unlikely to fill)</div>
+                <div class="target-row" style="color: #4ade80;">⬆️ $234.59 · May 20-Jun 03 (+30.6% rally, 60% conviction)</div>
                 <div class="confidence-row"> Dip conviction: 70%</div>
-                <div class="oneliner">Deep 18.6% dip expected (70% conviction). Hold firm. Wait.</div>
+                <div class="oneliner">Deep 18.9% dip expected (70% conviction). Hold firm. Wait.</div>
+                <div class="regime-note"><span class="regime-note-prefix">REGIME:</span> Breakdown — no reversal signal yet, dip-buy invalid until RSI>45 and 20d momentum positive. Drawdown -39.4% + 20d -13.0% + RSI 32 weak</div>
                 
-                <div style="font-size: 13px; color: #888; margin-top: 8px; padding-left: 16px; border-left: 2px solid #444;">
-                    └─ Fallback: BUY at $159.03 (11.4% dip, 80% conviction) May 11-25
-                </div>
-            
                 
                 <div class="consensus-row">🔮 Analyst consensus (12-mo): $285.00 median (+58.7%); Trend: → stable</div>
             </td>
@@ -393,15 +478,17 @@
                     <span class="signal-icon">⏳</span>
                     <span class="signal-text">WAIT</span>
                     <span class="rsi rsi-high">RSI 75</span>
+                    
                 </div>
                 <div class="price-row">$120.61 (today)</div>
-                <div class="target-row">⬇️ $101.38 · Jun 06-20 (15.9%)</div>
-                <div class="target-row" style="color: #4ade80;">⬆️ $149.69 · May 18-Jun 01 (+24.1% rally, 60% conviction)</div>
+                <div class="target-row">⬇️ $100.66 · Jun 07-21 (16.5%)</div>
+                <div class="target-row" style="color: #4ade80;">⬆️ $148.99 · May 20-Jun 03 (+23.5% rally, 60% conviction)</div>
                 <div class="confidence-row"> Dip conviction: 70%</div>
-                <div class="oneliner">Deep 15.9% dip expected (70% conviction). Hold firm. Wait.</div>
+                <div class="oneliner">Deep 16.5% dip expected (70% conviction). Hold firm. Wait.</div>
+                
                 
                 <div style="font-size: 13px; color: #888; margin-top: 8px; padding-left: 16px; border-left: 2px solid #444;">
-                    └─ Fallback: BUY at $109.06 (9.6% dip, 80% conviction) May 11-25
+                    └─ Fallback: BUY at $108.25 (10.3% dip, 80% conviction) May 13-27
                 </div>
             
                 
@@ -417,15 +504,17 @@
                     <span class="signal-icon">⏳</span>
                     <span class="signal-text">WAIT</span>
                     <span class="rsi rsi-high">RSI 70</span>
+                    
                 </div>
                 <div class="price-row">$1452.02 (today)</div>
-                <div class="target-row">⬇️ $1234.87 · Jun 05-19 (15.0%)</div>
-                <div class="target-row" style="color: #4ade80;">⬆️ $1795.56 · May 19-Jun 02 (+23.7% rally, 60% conviction)</div>
+                <div class="target-row">⬇️ $1241.50 · Jun 06-20 (14.5%)</div>
+                <div class="target-row" style="color: #4ade80;">⬆️ $1792.81 · May 20-Jun 03 (+23.5% rally, 60% conviction)</div>
                 <div class="confidence-row"> Dip conviction: 70%</div>
-                <div class="oneliner">Deep 15.0% dip expected (70% conviction). Hold firm. Wait.</div>
+                <div class="oneliner">Deep 14.5% dip expected (70% conviction). Hold firm. Wait.</div>
+                
                 
                 <div style="font-size: 13px; color: #888; margin-top: 8px; padding-left: 16px; border-left: 2px solid #444;">
-                    └─ Fallback: BUY at $1320.89 (9.0% dip, 80% conviction) May 11-25
+                    └─ Fallback: BUY at $1323.91 (8.8% dip, 80% conviction) May 12-26
                 </div>
             
                 
@@ -441,17 +530,15 @@
                     <span class="signal-icon">⏳</span>
                     <span class="signal-text">WAIT</span>
                     <span class="rsi rsi-high">RSI 79</span>
+                    <span class="regime-badge regime-momentum" title="Momentum regime — predicted dip unlikely to fill (won't reverse soon).">🚀 MOMENTUM 80% ✨</span>
                 </div>
                 <div class="price-row">$766.58 (today)</div>
-                <div class="target-row">⬇️ $660.54 · Jun 12-26 (13.8%)</div>
-                <div class="target-row" style="color: #4ade80;">⬆️ $904.83 · May 21-Jun 04 (+18.0% rally, 60% conviction)</div>
+                <div class="target-row">⬇️ $661.96 · Jun 12-26 (13.6% — ⚠️ regime override: unlikely to fill)</div>
+                <div class="target-row" style="color: #4ade80;">⬆️ $905.66 · May 21-Jun 04 (+18.1% rally, 60% conviction)</div>
                 <div class="confidence-row"> Dip conviction: 70%</div>
-                <div class="oneliner">Deep 13.8% dip expected (70% conviction). Hold firm. Wait.</div>
+                <div class="oneliner">Deep 13.6% dip expected (70% conviction). Hold firm. Wait.</div>
+                <div class="regime-note"><span class="regime-note-prefix">REGIME:</span> Momentum regime — predicted dip unlikely to fill (won't reverse soon). Short interest: 2.25% of float.</div>
                 
-                <div style="font-size: 13px; color: #888; margin-top: 8px; padding-left: 16px; border-left: 2px solid #444;">
-                    └─ Fallback: BUY at $701.01 (8.6% dip, 80% conviction) May 13-27
-                </div>
-            
                 
                 <div class="consensus-row">🔮 Analyst consensus (12-mo): $450.00 median (-41.3%); Trend: ↑ rising</div>
             </td>
@@ -465,45 +552,23 @@
                     <span class="signal-icon">⏳</span>
                     <span class="signal-text">WAIT</span>
                     <span class="rsi rsi-high">RSI 77</span>
+                    
                 </div>
                 <div class="price-row">$448.29 (today)</div>
-                <div class="target-row">⬇️ $391.16 · Jun 06-20 (12.7%)</div>
-                <div class="target-row" style="color: #4ade80;">⬆️ $530.11 · May 19-Jun 02 (+18.3% rally, 60% conviction)</div>
+                <div class="target-row">⬇️ $389.33 · Jun 06-20 (13.2%)</div>
+                <div class="target-row" style="color: #4ade80;">⬆️ $527.47 · May 19-Jun 02 (+17.7% rally, 60% conviction)</div>
                 <div class="confidence-row"> Dip conviction: 70%</div>
-                <div class="oneliner">Deep 12.7% dip expected (70% conviction). Hold firm. Wait.</div>
+                <div class="oneliner">Deep 13.2% dip expected (70% conviction). Hold firm. Wait.</div>
+                
                 
                 <div style="font-size: 13px; color: #888; margin-top: 8px; padding-left: 16px; border-left: 2px solid #444;">
-                    └─ Fallback: BUY at $414.85 (7.5% dip, 80% conviction) May 11-25
+                    └─ Fallback: BUY at $412.50 (8.0% dip, 80% conviction) May 12-26
                 </div>
             
                 
-                <div class="consensus-row">🔮 Analyst consensus (12-mo): $415.00 median (-7.4%); Trend: ↑ rising</div>
+                <div class="consensus-row">🔮 Analyst consensus (12-mo): $422.50 median (-5.8%); Trend: ↑ rising</div>
             </td>
             <td class="earnings">2026-08-04 ⚡</td>
-        </tr>
-        
-        <tr>
-            <td class="ticker"><a href="https://www.trading212.com/trading-instruments/invest/LDO.IT" target="_blank" rel="noopener noreferrer" class="ticker-link" title="Open LDO.MI on Trading 212">LDO.MI</a> </td>
-            <td>
-                <div class="signal-row">
-                    <span class="signal-icon">⏳</span>
-                    <span class="signal-text">WAIT</span>
-                    <span class="rsi ">RSI 41</span>
-                </div>
-                <div class="price-row">€54.02 (today)</div>
-                <div class="target-row">⬇️ €48.92 · Jun 03-17 (9.4%)</div>
-                <div class="target-row" style="color: #4ade80;">⬆️ €62.87 · May 20-Jun 03 (+16.4% rally, 60% conviction)</div>
-                <div class="confidence-row"> Dip conviction: 70%</div>
-                <div class="oneliner">Strong 9.4% dip expected (70% conviction). Be patient.</div>
-                
-                <div style="font-size: 13px; color: #888; margin-top: 8px; padding-left: 16px; border-left: 2px solid #444;">
-                    └─ Fallback: BUY at €51.06 (5.5% dip, 80% conviction) May 11-25
-                </div>
-            
-                
-                <div class="consensus-row">🔮 Analyst consensus (12-mo): €61.20 median (+13.3%); Trend: ↑ rising</div>
-            </td>
-            <td class="earnings">—</td>
         </tr>
         
         <tr>
@@ -513,21 +578,45 @@
                     <span class="signal-icon">⏳</span>
                     <span class="signal-text">WAIT</span>
                     <span class="rsi ">RSI 40</span>
+                    <span class="regime-badge regime-breakdown" title="Breakdown — no reversal signal yet, dip-buy invalid until RSI>45 and 20d momentum positive. Drawdown -16.9% + 20d -10.4% + RSI 40 weak">📉 BREAKDOWN 75%</span>
                 </div>
                 <div class="price-row">$146.87 (today)</div>
-                <div class="target-row">⬇️ $133.23 · Jun 07-21 (9.3%)</div>
-                <div class="target-row" style="color: #4ade80;">⬆️ $165.36 · May 18-Jun 01 (+12.6% rally, 60% conviction)</div>
+                <div class="target-row">⬇️ $133.08 · Jun 06-20 (9.4% — ⚠️ regime override: unlikely to fill)</div>
+                <div class="target-row" style="color: #4ade80;">⬆️ $164.75 · May 20-Jun 03 (+12.2% rally, 60% conviction)</div>
                 <div class="confidence-row"> Dip conviction: 70%</div>
-                <div class="oneliner">Strong 9.3% dip expected (70% conviction). Be patient.</div>
+                <div class="oneliner">Strong 9.4% dip expected (70% conviction). Be patient.</div>
+                <div class="regime-note"><span class="regime-note-prefix">REGIME:</span> Breakdown — no reversal signal yet, dip-buy invalid until RSI>45 and 20d momentum positive. Drawdown -16.9% + 20d -10.4% + RSI 40 weak</div>
                 
-                <div style="font-size: 13px; color: #888; margin-top: 8px; padding-left: 16px; border-left: 2px solid #444;">
-                    └─ Fallback: BUY at $138.84 (5.5% dip, 80% conviction) May 11-25
-                </div>
-            
                 
                 <div class="consensus-row">🔮 Analyst consensus (12-mo): $224.50 median (+52.9%); Trend: ↓ falling</div>
             </td>
             <td class="earnings">2026-08-06 ⚡</td>
+        </tr>
+        
+        <tr>
+            <td class="ticker"><a href="https://www.trading212.com/trading-instruments/invest/LDO.IT" target="_blank" rel="noopener noreferrer" class="ticker-link" title="Open LDO.MI on Trading 212">LDO.MI</a> </td>
+            <td>
+                <div class="signal-row">
+                    <span class="signal-icon">⏳</span>
+                    <span class="signal-text">WAIT</span>
+                    <span class="rsi ">RSI 41</span>
+                    
+                </div>
+                <div class="price-row">€54.02 (today)</div>
+                <div class="target-row">⬇️ €49.06 · Jun 03-17 (9.2%)</div>
+                <div class="target-row" style="color: #4ade80;">⬆️ €62.88 · May 21-Jun 04 (+16.4% rally, 60% conviction)</div>
+                <div class="confidence-row"> Dip conviction: 70%</div>
+                <div class="oneliner">Strong 9.2% dip expected (70% conviction). Be patient.</div>
+                
+                
+                <div style="font-size: 13px; color: #888; margin-top: 8px; padding-left: 16px; border-left: 2px solid #444;">
+                    └─ Fallback: BUY at €51.03 (5.5% dip, 80% conviction) May 12-26
+                </div>
+            
+                
+                <div class="consensus-row">🔮 Analyst consensus (12-mo): €61.20 median (+13.3%); Trend: ↑ rising</div>
+            </td>
+            <td class="earnings">—</td>
         </tr>
         
         <tr>
@@ -537,15 +626,17 @@
                     <span class="signal-icon">⏳</span>
                     <span class="signal-text">WAIT</span>
                     <span class="rsi ">RSI 41</span>
+                    
                 </div>
                 <div class="price-row">$603.00 (today)</div>
-                <div class="target-row">⬇️ $555.64 · Jun 07-21 (7.9%)</div>
-                <div class="target-row" style="color: #4ade80;">⬆️ $663.72 · May 18-Jun 01 (+10.1% rally, 60% conviction)</div>
+                <div class="target-row">⬇️ $553.76 · Jun 08-22 (8.2%)</div>
+                <div class="target-row" style="color: #4ade80;">⬆️ $661.31 · May 19-Jun 02 (+9.7% rally, 60% conviction)</div>
                 <div class="confidence-row"> Dip conviction: 70%</div>
-                <div class="oneliner">Strong 7.9% dip expected (70% conviction). Be patient.</div>
+                <div class="oneliner">Strong 8.2% dip expected (70% conviction). Be patient.</div>
+                
                 
                 <div style="font-size: 13px; color: #888; margin-top: 8px; padding-left: 16px; border-left: 2px solid #444;">
-                    └─ Fallback: BUY at $574.56 (4.7% dip, 80% conviction) May 12-26
+                    └─ Fallback: BUY at $573.09 (5.0% dip, 80% conviction) May 13-27
                 </div>
             
                 
@@ -555,25 +646,27 @@
         </tr>
         
         <tr>
-            <td class="ticker"><a href="https://www.trading212.com/trading-instruments/invest/AVGO.US" target="_blank" rel="noopener noreferrer" class="ticker-link" title="Open AVGO on Trading 212">AVGO</a> </td>
+            <td class="ticker"><a href="https://www.trading212.com/trading-instruments/invest/CRWD.US" target="_blank" rel="noopener noreferrer" class="ticker-link" title="Open CRWD on Trading 212">CRWD</a> </td>
             <td>
                 <div class="signal-row">
                     <span class="signal-icon">⏳</span>
                     <span class="signal-text">WAIT</span>
-                    <span class="rsi ">RSI 60</span>
+                    <span class="rsi rsi-high">RSI 77</span>
+                    
                 </div>
-                <div class="price-row">$419.30 (today)</div>
-                <div class="target-row">⬇️ $389.34 · Jun 01-15 (7.1%)</div>
-                <div class="target-row" style="color: #4ade80;">⬆️ $463.28 · May 21-Jun 04 (+10.5% rally, 60% conviction)</div>
+                <div class="price-row">$546.18 (today)</div>
+                <div class="target-row">⬇️ $505.73 · Jun 04-18 (7.4%)</div>
+                <div class="target-row" style="color: #4ade80;">⬆️ $593.17 · May 20-Jun 03 (+8.6% rally, 60% conviction)</div>
                 <div class="confidence-row"> Dip conviction: 70%</div>
-                <div class="oneliner">Strong 7.1% dip expected (70% conviction). Be patient.</div>
+                <div class="oneliner">Strong 7.4% dip expected (70% conviction). Be patient.</div>
+                
                 
                 <div style="font-size: 13px; color: #888; margin-top: 8px; padding-left: 16px; border-left: 2px solid #444;">
-                    └─ Fallback: BUY at $401.80 (4.2% dip, 80% conviction) May 12-26
+                    └─ Fallback: BUY at $521.86 (4.5% dip, 80% conviction) May 13-27
                 </div>
             
                 
-                <div class="consensus-row">🔮 Analyst consensus (12-mo): $450.00 median (+7.3%)</div>
+                <div class="consensus-row">🔮 Analyst consensus (12-mo): $522.50 median (-4.3%); Trend: ↑ rising</div>
             </td>
             <td class="earnings">2026-06-03 ⚡</td>
         </tr>
@@ -585,15 +678,17 @@
                     <span class="signal-icon">⏳</span>
                     <span class="signal-text">WAIT</span>
                     <span class="rsi ">RSI 44</span>
+                    
                 </div>
                 <div class="price-row">$136.00 (today)</div>
-                <div class="target-row">⬇️ $126.35 · Jun 03-17 (7.1%)</div>
-                <div class="target-row" style="color: #4ade80;">⬆️ $151.78 · May 19-Jun 02 (+11.6% rally, 60% conviction)</div>
+                <div class="target-row">⬇️ $126.11 · Jun 03-17 (7.3%)</div>
+                <div class="target-row" style="color: #4ade80;">⬆️ $152.12 · May 21-Jun 04 (+11.9% rally, 60% conviction)</div>
                 <div class="confidence-row"> Dip conviction: 70%</div>
-                <div class="oneliner">Strong 7.1% dip expected (70% conviction). Be patient.</div>
+                <div class="oneliner">Strong 7.3% dip expected (70% conviction). Be patient.</div>
+                
                 
                 <div style="font-size: 13px; color: #888; margin-top: 8px; padding-left: 16px; border-left: 2px solid #444;">
-                    └─ Fallback: BUY at $130.39 (4.1% dip, 80% conviction) May 11-25
+                    └─ Fallback: BUY at $130.02 (4.4% dip, 80% conviction) May 12-26
                 </div>
             
                 
@@ -603,51 +698,55 @@
         </tr>
         
         <tr>
+            <td class="ticker"><a href="https://www.trading212.com/trading-instruments/invest/AVGO.US" target="_blank" rel="noopener noreferrer" class="ticker-link" title="Open AVGO on Trading 212">AVGO</a> </td>
+            <td>
+                <div class="signal-row">
+                    <span class="signal-icon">⏳</span>
+                    <span class="signal-text">WAIT</span>
+                    <span class="rsi ">RSI 60</span>
+                    
+                </div>
+                <div class="price-row">$419.30 (today)</div>
+                <div class="target-row">⬇️ $388.83 · Jun 01-15 (7.3%)</div>
+                <div class="target-row" style="color: #4ade80;">⬆️ $463.48 · May 23-Jun 06 (+10.5% rally, 60% conviction)</div>
+                <div class="confidence-row"> Dip conviction: 70%</div>
+                <div class="oneliner">Strong 7.3% dip expected (70% conviction). Be patient.</div>
+                
+                
+                <div style="font-size: 13px; color: #888; margin-top: 8px; padding-left: 16px; border-left: 2px solid #444;">
+                    └─ Fallback: BUY at $401.51 (4.2% dip, 80% conviction) May 12-26
+                </div>
+            
+                
+                <div class="consensus-row">🔮 Analyst consensus (12-mo): $450.00 median (+7.3%)</div>
+            </td>
+            <td class="earnings">2026-06-03 ⚡</td>
+        </tr>
+        
+        <tr>
             <td class="ticker"><a href="https://www.trading212.com/trading-instruments/invest/ASML.NL" target="_blank" rel="noopener noreferrer" class="ticker-link" title="Open ASML on Trading 212">ASML</a> </td>
             <td>
                 <div class="signal-row">
                     <span class="signal-icon">⏳</span>
                     <span class="signal-text">WAIT</span>
                     <span class="rsi ">RSI 56</span>
+                    
                 </div>
-                <div class="price-row">€1288.93 (today)</div>
-                <div class="target-row">⬇️ €1198.77 · Jun 04-18 (7.0%)</div>
-                <div class="target-row" style="color: #4ade80;">⬆️ €1434.93 · May 20-Jun 03 (+11.3% rally, 60% conviction)</div>
+                <div class="price-row">€1299.95 (today)</div>
+                <div class="target-row">⬇️ €1206.59 · Jun 05-19 (7.2%)</div>
+                <div class="target-row" style="color: #4ade80;">⬆️ €1442.80 · May 21-Jun 04 (+11.0% rally, 60% conviction)</div>
                 <div class="confidence-row"> Dip conviction: 70%</div>
-                <div class="oneliner">Strong 7.0% dip expected (70% conviction). Be patient.</div>
+                <div class="oneliner">Strong 7.2% dip expected (70% conviction). Be patient.</div>
+                
                 
                 <div style="font-size: 13px; color: #888; margin-top: 8px; padding-left: 16px; border-left: 2px solid #444;">
-                    └─ Fallback: BUY at €1237.92 (4.0% dip, 80% conviction) May 11-25
+                    └─ Fallback: BUY at €1243.45 (4.3% dip, 80% conviction) May 12-26
                 </div>
             
                 
-                <div class="consensus-row">🔮 Analyst consensus (12-mo): €1461.86 median (+13.4%); Trend: → stable</div>
+                <div class="consensus-row">🔮 Analyst consensus (12-mo): €1474.36 median (+13.4%); Trend: → stable</div>
             </td>
             <td class="earnings">2026-07-15 ⚡</td>
-        </tr>
-        
-        <tr>
-            <td class="ticker"><a href="https://www.trading212.com/trading-instruments/invest/LLY.US" target="_blank" rel="noopener noreferrer" class="ticker-link" title="Open LLY on Trading 212">LLY</a> </td>
-            <td>
-                <div class="signal-row">
-                    <span class="signal-icon">⏳</span>
-                    <span class="signal-text">WAIT</span>
-                    <span class="rsi ">RSI 60</span>
-                </div>
-                <div class="price-row">$989.87 (today)</div>
-                <div class="target-row">⬇️ $923.18 · Jun 04-18 (6.7%)</div>
-                <div class="target-row" style="color: #4ade80;">⬆️ $1089.17 · May 19-Jun 02 (+10.0% rally, 60% conviction)</div>
-                <div class="confidence-row"> Dip conviction: 70%</div>
-                <div class="oneliner">Strong 6.7% dip expected (70% conviction). Be patient.</div>
-                
-                <div style="font-size: 13px; color: #888; margin-top: 8px; padding-left: 16px; border-left: 2px solid #444;">
-                    └─ Fallback: BUY at $950.21 (4.0% dip, 80% conviction) May 11-25
-                </div>
-            
-                
-                <div class="consensus-row">🔮 Analyst consensus (12-mo): $1280.00 median (+29.3%); Trend: ↑ rising</div>
-            </td>
-            <td class="earnings">2026-08-05 ⚡</td>
         </tr>
         
         <tr>
@@ -657,15 +756,17 @@
                     <span class="signal-icon">⏳</span>
                     <span class="signal-text">WAIT</span>
                     <span class="rsi ">RSI 45</span>
+                    
                 </div>
                 <div class="price-row">$293.60 (today)</div>
-                <div class="target-row">⬇️ $274.01 · Jun 03-17 (6.7%)</div>
-                <div class="target-row" style="color: #4ade80;">⬆️ $327.70 · May 20-Jun 03 (+11.6% rally, 60% conviction)</div>
+                <div class="target-row">⬇️ $272.96 · Jun 03-17 (7.0%)</div>
+                <div class="target-row" style="color: #4ade80;">⬆️ $326.91 · May 21-Jun 04 (+11.3% rally, 60% conviction)</div>
                 <div class="confidence-row"> Dip conviction: 70%</div>
-                <div class="oneliner">Strong 6.7% dip expected (70% conviction). Be patient.</div>
+                <div class="oneliner">Strong 7.0% dip expected (70% conviction). Be patient.</div>
+                
                 
                 <div style="font-size: 13px; color: #888; margin-top: 8px; padding-left: 16px; border-left: 2px solid #444;">
-                    └─ Fallback: BUY at $282.50 (3.8% dip, 80% conviction) May 11-25
+                    └─ Fallback: BUY at $281.11 (4.3% dip, 80% conviction) May 12-26
                 </div>
             
                 
@@ -681,15 +782,17 @@
                     <span class="signal-icon">⏳</span>
                     <span class="signal-text">WAIT</span>
                     <span class="rsi ">RSI 67</span>
+                    
                 </div>
                 <div class="price-row">$433.45 (today)</div>
-                <div class="target-row">⬇️ $404.55 · Jun 05-19 (6.7%)</div>
-                <div class="target-row" style="color: #4ade80;">⬆️ $473.35 · May 19-Jun 02 (+9.2% rally, 60% conviction)</div>
+                <div class="target-row">⬇️ $403.43 · Jun 07-21 (6.9%)</div>
+                <div class="target-row" style="color: #4ade80;">⬆️ $471.62 · May 19-Jun 02 (+8.8% rally, 60% conviction)</div>
                 <div class="confidence-row"> Dip conviction: 70%</div>
-                <div class="oneliner">Strong 6.7% dip expected (70% conviction). Be patient.</div>
+                <div class="oneliner">Strong 6.9% dip expected (70% conviction). Be patient.</div>
+                
                 
                 <div style="font-size: 13px; color: #888; margin-top: 8px; padding-left: 16px; border-left: 2px solid #444;">
-                    └─ Fallback: BUY at $416.05 (4.0% dip, 80% conviction) May 11-25
+                    └─ Fallback: BUY at $415.71 (4.1% dip, 80% conviction) May 12-26
                 </div>
             
                 
@@ -699,21 +802,49 @@
         </tr>
         
         <tr>
+            <td class="ticker"><a href="https://www.trading212.com/trading-instruments/invest/LLY.US" target="_blank" rel="noopener noreferrer" class="ticker-link" title="Open LLY on Trading 212">LLY</a> </td>
+            <td>
+                <div class="signal-row">
+                    <span class="signal-icon">⏳</span>
+                    <span class="signal-text">WAIT</span>
+                    <span class="rsi ">RSI 60</span>
+                    
+                </div>
+                <div class="price-row">$989.87 (today)</div>
+                <div class="target-row">⬇️ $923.32 · Jun 05-19 (6.7%)</div>
+                <div class="target-row" style="color: #4ade80;">⬆️ $1089.38 · May 20-Jun 03 (+10.1% rally, 60% conviction)</div>
+                <div class="confidence-row"> Dip conviction: 70%</div>
+                <div class="oneliner">Strong 6.7% dip expected (70% conviction). Be patient.</div>
+                
+                
+                <div style="font-size: 13px; color: #888; margin-top: 8px; padding-left: 16px; border-left: 2px solid #444;">
+                    └─ Fallback: BUY at $951.59 (3.9% dip, 80% conviction) May 12-26
+                </div>
+            
+                
+                <div class="consensus-row">🔮 Analyst consensus (12-mo): $1280.00 median (+29.3%); Trend: ↑ rising</div>
+            </td>
+            <td class="earnings">2026-08-05 ⚡</td>
+        </tr>
+        
+        <tr>
             <td class="ticker"><a href="https://www.trading212.com/trading-instruments/invest/NVDA.US" target="_blank" rel="noopener noreferrer" class="ticker-link" title="Open NVDA on Trading 212">NVDA</a> </td>
             <td>
                 <div class="signal-row">
                     <span class="signal-icon">⏳</span>
                     <span class="signal-text">WAIT</span>
                     <span class="rsi ">RSI 69</span>
+                    
                 </div>
                 <div class="price-row">$220.78 (today)</div>
-                <div class="target-row">⬇️ $207.82 · May 31-Jun 14 (5.9%)</div>
-                <div class="target-row" style="color: #4ade80;">⬆️ $239.48 · likely around earnings (May 20) (+8.5% rally, 60% conviction)</div>
+                <div class="target-row">⬇️ $207.57 · Jun 01-15 (6.0%)</div>
+                <div class="target-row" style="color: #4ade80;">⬆️ $239.33 · likely around earnings (May 20) (+8.4% rally, 60% conviction)</div>
                 <div class="confidence-row"> Dip conviction: 70%</div>
-                <div class="oneliner">Strong 5.9% dip expected (70% conviction). Be patient.</div>
+                <div class="oneliner">Strong 6.0% dip expected (70% conviction). Be patient.</div>
+                
                 
                 <div style="font-size: 13px; color: #888; margin-top: 8px; padding-left: 16px; border-left: 2px solid #444;">
-                    └─ Fallback: BUY at $213.24 (3.4% dip, 80% conviction) likely around earnings (May 20)
+                    └─ Fallback: BUY at $212.92 (3.6% dip, 80% conviction) likely around earnings (May 20)
                 </div>
             
                 
@@ -729,15 +860,17 @@
                     <span class="signal-icon">⏳</span>
                     <span class="signal-text">WAIT</span>
                     <span class="rsi rsi-high">RSI 70</span>
+                    
                 </div>
                 <div class="price-row">$387.35 (today)</div>
-                <div class="target-row">⬇️ $366.36 · Jun 06-20 (5.4%)</div>
-                <div class="target-row" style="color: #4ade80;">⬆️ $414.15 · May 18-Jun 01 (+6.9% rally, 60% conviction)</div>
+                <div class="target-row">⬇️ $365.15 · Jun 08-22 (5.7%)</div>
+                <div class="target-row" style="color: #4ade80;">⬆️ $413.07 · May 19-Jun 02 (+6.6% rally, 60% conviction)</div>
                 <div class="confidence-row"> Dip conviction: 70%</div>
-                <div class="oneliner">Strong 5.4% dip expected (70% conviction). Be patient.</div>
+                <div class="oneliner">Strong 5.7% dip expected (70% conviction). Be patient.</div>
+                
                 
                 <div style="font-size: 13px; color: #888; margin-top: 8px; padding-left: 16px; border-left: 2px solid #444;">
-                    └─ Fallback: BUY at $374.73 (3.3% dip, 80% conviction) May 11-25
+                    └─ Fallback: BUY at $373.86 (3.5% dip, 80% conviction) May 13-27
                 </div>
             
                 
@@ -753,15 +886,17 @@
                     <span class="signal-icon">⏳</span>
                     <span class="signal-text">WAIT</span>
                     <span class="rsi ">RSI 58</span>
+                    
                 </div>
                 <div class="price-row">$213.81 (today)</div>
-                <div class="target-row">⬇️ $203.23 · Jun 05-19 (4.9%)</div>
-                <div class="target-row" style="color: #4ade80;">⬆️ $228.94 · May 19-Jun 02 (+7.1% rally, 60% conviction)</div>
+                <div class="target-row">⬇️ $203.43 · Jun 04-18 (4.9%)</div>
+                <div class="target-row" style="color: #4ade80;">⬆️ $229.10 · May 21-Jun 04 (+7.2% rally, 60% conviction)</div>
                 <div class="confidence-row"> Dip conviction: 70%</div>
                 <div class="oneliner">Moderate 4.9% dip expected (70% conviction). Worth waiting.</div>
                 
+                
                 <div style="font-size: 13px; color: #888; margin-top: 8px; padding-left: 16px; border-left: 2px solid #444;">
-                    └─ Fallback: BUY NOW (3.0% dip, 80% conviction) May 11-25
+                    └─ Fallback: BUY NOW (2.7% dip, 80% conviction) May 12-26
                 </div>
             
                 
@@ -777,15 +912,17 @@
                     <span class="signal-icon">⏳</span>
                     <span class="signal-text">WAIT</span>
                     <span class="rsi ">RSI 60</span>
+                    
                 </div>
                 <div class="price-row">$326.42 (today)</div>
-                <div class="target-row">⬇️ $311.44 · Jun 04-18 (4.6%)</div>
-                <div class="target-row" style="color: #4ade80;">⬆️ $348.17 · May 20-Jun 03 (+6.7% rally, 60% conviction)</div>
+                <div class="target-row">⬇️ $310.98 · Jun 06-20 (4.7%)</div>
+                <div class="target-row" style="color: #4ade80;">⬆️ $347.09 · May 20-Jun 03 (+6.3% rally, 60% conviction)</div>
                 <div class="confidence-row"> Dip conviction: 70%</div>
-                <div class="oneliner">Moderate 4.6% dip expected (70% conviction). Worth waiting.</div>
+                <div class="oneliner">Moderate 4.7% dip expected (70% conviction). Worth waiting.</div>
+                
                 
                 <div style="font-size: 13px; color: #888; margin-top: 8px; padding-left: 16px; border-left: 2px solid #444;">
-                    └─ Fallback: BUY NOW (2.7% dip, 80% conviction) May 11-25
+                    └─ Fallback: BUY NOW (2.8% dip, 80% conviction) May 12-26
                 </div>
             
                 
@@ -801,15 +938,17 @@
                     <span class="signal-icon">⏳</span>
                     <span class="signal-text">WAIT</span>
                     <span class="rsi ">RSI 49</span>
+                    
                 </div>
                 <div class="price-row">$407.77 (today)</div>
-                <div class="target-row">⬇️ $389.79 · Jun 02-16 (4.4%)</div>
-                <div class="target-row" style="color: #4ade80;">⬆️ $437.75 · May 20-Jun 03 (+7.4% rally, 60% conviction)</div>
+                <div class="target-row">⬇️ $389.25 · Jun 03-17 (4.5%)</div>
+                <div class="target-row" style="color: #4ade80;">⬆️ $438.16 · May 21-Jun 04 (+7.5% rally, 60% conviction)</div>
                 <div class="confidence-row"> Dip conviction: 70%</div>
-                <div class="oneliner">Moderate 4.4% dip expected (70% conviction). Worth waiting.</div>
+                <div class="oneliner">Moderate 4.5% dip expected (70% conviction). Worth waiting.</div>
+                
                 
                 <div style="font-size: 13px; color: #888; margin-top: 8px; padding-left: 16px; border-left: 2px solid #444;">
-                    └─ Fallback: BUY NOW (2.5% dip, 80% conviction) May 10-24
+                    └─ Fallback: BUY NOW (2.6% dip, 80% conviction) May 11-25
                 </div>
             
                 
@@ -819,45 +958,23 @@
         </tr>
         
         <tr>
-            <td class="ticker"><a href="https://www.trading212.com/trading-instruments/invest/WMT.US" target="_blank" rel="noopener noreferrer" class="ticker-link" title="Open WMT on Trading 212">WMT</a> </td>
-            <td>
-                <div class="signal-row">
-                    <span class="signal-icon">⏳</span>
-                    <span class="signal-text">WAIT</span>
-                    <span class="rsi ">RSI 55</span>
-                </div>
-                <div class="price-row">$130.35 (today)</div>
-                <div class="target-row">⬇️ $125.70 · May 31-Jun 14 (3.6%)</div>
-                <div class="target-row" style="color: #4ade80;">⬆️ $137.16 · likely around earnings (May 21) (+5.2% rally, 60% conviction)</div>
-                <div class="confidence-row"> Dip conviction: 70%</div>
-                <div class="oneliner">Moderate 3.6% dip expected (70% conviction). Worth waiting.</div>
-                
-                <div style="font-size: 13px; color: #888; margin-top: 8px; padding-left: 16px; border-left: 2px solid #444;">
-                    └─ Fallback: BUY NOW (2.1% dip, 80% conviction) likely around earnings (May 21)
-                </div>
-            
-                
-                <div class="consensus-row">🔮 Analyst consensus (12-mo): $138.50 median (+6.3%); Trend: → stable</div>
-            </td>
-            <td class="earnings">2026-05-21 ⚡</td>
-        </tr>
-        
-        <tr>
             <td class="ticker"><a href="https://www.trading212.com/trading-instruments/invest/AMZN.US" target="_blank" rel="noopener noreferrer" class="ticker-link" title="Open AMZN on Trading 212">AMZN</a> </td>
             <td>
                 <div class="signal-row">
                     <span class="signal-icon">⏳</span>
                     <span class="signal-text">WAIT</span>
                     <span class="rsi ">RSI 64</span>
+                    
                 </div>
                 <div class="price-row">$265.82 (today)</div>
-                <div class="target-row">⬇️ $256.42 · Jun 06-20 (3.5%)</div>
-                <div class="target-row" style="color: #4ade80;">⬆️ $278.28 · May 18-Jun 01 (+4.7% rally, 60% conviction)</div>
+                <div class="target-row">⬇️ $255.46 · Jun 08-22 (3.9%)</div>
+                <div class="target-row" style="color: #4ade80;">⬆️ $277.96 · May 20-Jun 03 (+4.6% rally, 60% conviction)</div>
                 <div class="confidence-row"> Dip conviction: 70%</div>
-                <div class="oneliner">Moderate 3.5% dip expected (70% conviction). Worth waiting.</div>
+                <div class="oneliner">Moderate 3.9% dip expected (70% conviction). Worth waiting.</div>
+                
                 
                 <div style="font-size: 13px; color: #888; margin-top: 8px; padding-left: 16px; border-left: 2px solid #444;">
-                    └─ Fallback: BUY NOW (2.1% dip, 80% conviction) May 11-25
+                    └─ Fallback: BUY NOW (2.4% dip, 80% conviction) May 13-27
                 </div>
             
                 
@@ -867,18 +984,46 @@
         </tr>
         
         <tr>
+            <td class="ticker"><a href="https://www.trading212.com/trading-instruments/invest/WMT.US" target="_blank" rel="noopener noreferrer" class="ticker-link" title="Open WMT on Trading 212">WMT</a> </td>
+            <td>
+                <div class="signal-row">
+                    <span class="signal-icon">⏳</span>
+                    <span class="signal-text">WAIT</span>
+                    <span class="rsi ">RSI 55</span>
+                    
+                </div>
+                <div class="price-row">$130.35 (today)</div>
+                <div class="target-row">⬇️ $125.45 · Jun 01-15 (3.8%)</div>
+                <div class="target-row" style="color: #4ade80;">⬆️ $136.71 · likely around earnings (May 21) (+4.9% rally, 60% conviction)</div>
+                <div class="confidence-row"> Dip conviction: 70%</div>
+                <div class="oneliner">Moderate 3.8% dip expected (70% conviction). Worth waiting.</div>
+                
+                
+                <div style="font-size: 13px; color: #888; margin-top: 8px; padding-left: 16px; border-left: 2px solid #444;">
+                    └─ Fallback: BUY NOW (2.2% dip, 80% conviction) likely around earnings (May 21)
+                </div>
+            
+                
+                <div class="consensus-row">🔮 Analyst consensus (12-mo): $138.50 median (+6.3%); Trend: ↑ rising</div>
+            </td>
+            <td class="earnings">2026-05-21 ⚡</td>
+        </tr>
+        
+        <tr>
             <td class="ticker"><a href="https://www.trading212.com/trading-instruments/invest/MA.US" target="_blank" rel="noopener noreferrer" class="ticker-link" title="Open MA on Trading 212">MA</a> </td>
             <td>
                 <div class="signal-row">
                     <span class="signal-icon">⏳</span>
                     <span class="signal-text">WAIT</span>
                     <span class="rsi ">RSI 48</span>
+                    
                 </div>
                 <div class="price-row">$499.81 (today)</div>
-                <div class="target-row">⬇️ $483.17 · Jun 02-16 (3.3%)</div>
-                <div class="target-row" style="color: #4ade80;">⬆️ $529.00 · May 21-Jun 04 (+5.8% rally, 60% conviction)</div>
+                <div class="target-row">⬇️ $483.46 · Jun 02-16 (3.3%)</div>
+                <div class="target-row" style="color: #4ade80;">⬆️ $528.06 · May 22-Jun 05 (+5.7% rally, 60% conviction)</div>
                 <div class="confidence-row"> Dip conviction: 70%</div>
                 <div class="oneliner">Moderate 3.3% dip expected (70% conviction). Worth waiting.</div>
+                
                 
                 <div style="font-size: 13px; color: #888; margin-top: 8px; padding-left: 16px; border-left: 2px solid #444;">
                     └─ Fallback: BUY NOW (1.9% dip, 80% conviction) May 11-25

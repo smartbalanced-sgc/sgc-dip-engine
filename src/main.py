@@ -26,7 +26,8 @@ from hmm_regime import detect_regime_simple, get_regime_adjustments
 from macro_regime import fetch_macro_indicators, classify_macro_regime, get_macro_adjustments
 from correlation import build_correlation_matrix
 from monte_carlo import simulate_portfolio
-from sentiment import detect_catalysts, run_ai_intelligence, prioritize_buy_signals
+from sentiment import detect_catalysts, run_ai_intelligence, prioritize_buy_signals, get_client
+from regime_classifier import classify_portfolio
 from execution_logic import process_execution_signals
 from dashboard_generator import generate_html, save_html
 from signal_archiver import archive_signals
@@ -53,7 +54,7 @@ def main():
     # STEP 1: Fetch all data (15 FMP endpoints + Eulerpool/yfinance + macro)
     # =========================================================
     print("\n📊 STEP 1: Fetching portfolio data...")
-    portfolio_data, macro_events = fetch_portfolio_data()
+    portfolio_data, macro_events, sector_perf = fetch_portfolio_data()
 
     # ----- GATE 1: Input data validation -----
     print("\n🔒 GATE 1: Validating input data...")
@@ -186,12 +187,38 @@ def main():
     # =========================================================
     # STEP 6: Generate execution signals
     # §Session 2: portfolio_data + macro_events for anchor suppression + catalyst dates
+    # §May 13: regime_results modulates BUY/WAIT signals
     # =========================================================
+    # Regime classification — runs BEFORE execution signals so it can modulate them
+    # §regime_classifier.enabled — config-gated
+    regime_results = {}
+    if get_config('regime_classifier', 'enabled', default=False):
+        print("\n🎯 Classifying per-stock trade regimes...")
+        try:
+            # Reuse the same Anthropic client pattern from sentiment.py
+            ai_client = get_client() if get_config('regime_classifier', 'ai_research', 'enabled', default=False) else None
+            regime_results = classify_portfolio(portfolio_data, sector_perf, client=ai_client)
+            for ticker, result in regime_results.items():
+                regime = result.get('regime', 'NORMAL')
+                conf = result.get('confidence', 0)
+                if regime != 'NORMAL':
+                    icon = {
+                        'MOMENTUM': '🚀',
+                        'SQUEEZE_RISK': '⚠️',
+                        'OVERSOLD_REVERSAL': '💎',
+                        'BREAKDOWN': '📉',
+                    }.get(regime, '•')
+                    print(f"   {icon} {ticker}: {regime} (conf {conf:.0%}) — {result.get('reasoning', '')[:80]}")
+        except Exception as e:
+            print(f"   ⚠️  Regime classification failed: {e}")
+            regime_results = {}
+
     print("\n⚡ STEP 6: Generating execution signals...")
     execution_data = process_execution_signals(
         simulation_results,
         portfolio_data=portfolio_data,  # §Session 2: anchor suppression
-        macro_events=macro_events       # §Session 2: catalyst dates
+        macro_events=macro_events,      # §Session 2: catalyst dates
+        regime_results=regime_results   # §May 13: regime modulates BUY/WAIT
     )
 
     for ticker, data in execution_data.items():
@@ -204,7 +231,7 @@ def main():
     if len(buy_tickers) >= 2:
         print(f"\n   🎯 Prioritizing {len(buy_tickers)} BUY signals...")
         try:
-            ranked, rationale, priority_cost = prioritize_buy_signals(buy_tickers, portfolio_data, None)
+            ranked, rationale, priority_cost = prioritize_buy_signals(buy_tickers, portfolio_data, get_client())
             for i, ticker in enumerate(ranked):
                 execution_data[ticker]['_priority_rank'] = i + 1
                 execution_data[ticker]['_priority_reason'] = rationale.get(ticker, '')
@@ -239,16 +266,18 @@ def main():
         macro_indicators['vix'],
         portfolio_data,
         warnings=all_warnings,
-        backtest_results=backtest_results  # §Session 2: backtest on dashboard
+        backtest_results=backtest_results,  # §Session 2: backtest on dashboard
+        regime_results=regime_results        # §May 13: regime tags on dashboard
     )
     save_html(html)
 
     # =========================================================
     # STEP 8: Archive signals for backtest
+    # §May 13: regime persisted for future backtest analysis
     # =========================================================
     print("\n📝 STEP 8: Archiving signals...")
     try:
-        archive_signals(execution_data, portfolio_data)
+        archive_signals(execution_data, portfolio_data, regime_results=regime_results)
     except Exception as e:
         print(f"   ⚠️  Signal archive failed: {e}")
 

@@ -170,15 +170,25 @@ def format_date_range(median_date_index, days_window=7, earnings_date=None, macr
         return f"{window_start.strftime('%b %d')}-{window_end.strftime('%b %d')}"
 
 
-def process_execution_signals(simulation_results, portfolio_data=None, macro_events=None):
+def process_execution_signals(simulation_results, portfolio_data=None, macro_events=None,
+                              regime_results=None):
     """
     Generate all signals and one-liners for portfolio.
     Returns: dict per ticker with signal, one_liner, date_range, dip_pct
 
     Session 2: accepts portfolio_data for anchor suppression,
     macro_events for catalyst-aware date formatting.
+    
+    May 13: accepts regime_results to modulate BUY/WAIT signals based on
+    per-stock trade regime (NORMAL/MOMENTUM/SQUEEZE_RISK/OVERSOLD_REVERSAL/BREAKDOWN).
+    Refer to config.yaml regime_classifier.signal_modulation for behaviour map.
     """
     execution_data = {}
+    
+    # §regime_classifier.signal_modulation — behavioural map per regime
+    modulation_map = get_config('regime_classifier', 'signal_modulation', default={}) or {}
+    # §regime_classifier.suppress_signals — master toggle for active modulation
+    suppress_enabled = get_config('regime_classifier', 'suppress_signals', default=False)
 
     for ticker, result in simulation_results.items():
         if result.get('_exclude'):
@@ -197,8 +207,17 @@ def process_execution_signals(simulation_results, portfolio_data=None, macro_eve
         one_liner = generate_one_liner(signal, dip_pct, reason_code)
 
       # Session 3: Generate fallback signal when primary is WAIT
+        # §May 13: Suppress fallback when regime is suppress_buy — fallback is just a
+        # more-conservative dip-buy; same regime logic applies. Avoids contradictory
+        # "dip-buy disabled" + "fallback BUY available" display.
         fallback = None
-        if signal == 'WAIT':
+        regime_for_fallback_check = (regime_results or {}).get(ticker, {}).get('regime', 'NORMAL')
+        fallback_suppress_action = modulation_map.get(regime_for_fallback_check, 'pass_through')
+        fallback_suppressed_by_regime = (
+            suppress_enabled and fallback_suppress_action == 'suppress_buy'
+        )
+        
+        if signal == 'WAIT' and not fallback_suppressed_by_regime:
             fb_signal, fb_reason, fb_dip = generate_signal(current, result['fallback_low'])
             
             # Only show fallback if actionable (BUY or meaningful WAIT)
@@ -254,6 +273,51 @@ def process_execution_signals(simulation_results, portfolio_data=None, macro_eve
                 'upside_pct': upside_pct,
                 'trend': trend,
             }
+        
+        # =================================================================
+        # §May 13: REGIME MODULATION — override BUY/WAIT based on regime
+        # =================================================================
+        regime_info = (regime_results or {}).get(ticker, {})
+        regime = regime_info.get('regime', 'NORMAL')
+        regime_reasoning = regime_info.get('reasoning', '')
+        regime_confidence = regime_info.get('confidence', 0)
+        regime_ai = regime_info.get('ai_research', {})
+        
+        # §regime_classifier.signal_modulation — action per regime
+        action = modulation_map.get(regime, 'pass_through')
+        original_signal = signal
+        regime_overrode = False
+        regime_note = ''
+        
+        # §regime_classifier.signal_modulation — emit regime note FIRST regardless
+        # of override, so traders see the regime context even when signal is already WAIT.
+        # Notes for suppress_buy regimes explain why the predicted dip is unlikely to fill.
+        if suppress_enabled and action == 'suppress_buy':
+            # §May 13 patch: append reasoning only when non-empty; avoids orphan punctuation
+            reasoning_suffix = f" {regime_reasoning}" if regime_reasoning else ""
+            if regime == 'MOMENTUM':
+                regime_note = f"Momentum regime — predicted dip unlikely to fill (won't reverse soon).{reasoning_suffix}"
+            elif regime == 'SQUEEZE_RISK':
+                regime_note = f"Squeeze risk — rally may be forced, predicted dip unlikely until short interest clears.{reasoning_suffix}"
+            elif regime == 'BREAKDOWN':
+                regime_note = f"Breakdown — no reversal signal yet, dip-buy invalid until RSI>45 and 20d momentum positive.{reasoning_suffix}"
+            
+            # If signal was BUY, override to WAIT and adjust one-liner
+            if signal == 'BUY':
+                signal = 'WAIT'
+                regime_overrode = True
+                if regime == 'MOMENTUM':
+                    one_liner = "Momentum regime — dip-buy suppressed. Monitor for technical reset (RSI<70 + vol compression)."
+                elif regime == 'SQUEEZE_RISK':
+                    one_liner = "Squeeze risk regime — dip-buy suppressed. Stand down until short interest clears."
+                elif regime == 'BREAKDOWN':
+                    one_liner = "Breakdown regime — dip-buy suppressed. Wait for reversal confirmation (RSI>45 + 20d momentum positive)."
+        elif action == 'boost_conviction' and signal in ('BUY', 'WAIT'):
+            # §regime_classifier.signal_modulation.OVERSOLD_REVERSAL
+            reasoning_suffix = f" {regime_reasoning}" if regime_reasoning else ""
+            regime_note = f"Oversold reversal — high-conviction setup.{reasoning_suffix}"
+            if signal == 'BUY':
+                one_liner = f"⭐ {one_liner} Oversold reversal regime — conviction elevated."
 
         execution_data[ticker] = {
             'signal': signal,
@@ -276,6 +340,14 @@ def process_execution_signals(simulation_results, portfolio_data=None, macro_eve
             'terminal_median': result.get('terminal_median'),
             # Session 8: Analyst consensus
             'analyst_consensus': analyst_consensus,
+            # §May 13: Regime metadata (consumed by dashboard + archiver)
+            'regime': regime,
+            'regime_confidence': regime_confidence,
+            'regime_reasoning': regime_reasoning,
+            'regime_note': regime_note,
+            'regime_overrode': regime_overrode,
+            'regime_original_signal': original_signal if regime_overrode else None,
+            'regime_ai_research': regime_ai,
         }
 
     return execution_data

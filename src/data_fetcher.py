@@ -66,8 +66,24 @@ def fetch_fx_rate(base='EUR', target='USD'):
 # Ref: rationale.md §2.2 — symbol in query params, NOT path
 # =============================================================
 
+# §May 13 patch 4 — module-level cache of tickers known to be blocked on this plan
+# After first 402 for a ticker, subsequent endpoint calls short-circuit instantly.
+# Saves ~11 wasted API calls per blocked ticker per run (IGLN.L, RR.GB, BARC.GB).
+_FMP_BLOCKED_TICKERS = set()
+
+
 def fmp_get(endpoint, symbol, extra_params=None):
-    """FMP stable API call. Returns parsed JSON or None."""
+    """
+    FMP stable API call. Returns parsed JSON or None.
+    
+    Short-circuits with None (no API call) if `symbol` is in _FMP_BLOCKED_TICKERS,
+    which is populated whenever any endpoint returns 402 (payment required).
+    Once a ticker is known to be unavailable on the current plan, we stop trying.
+    """
+    # §May 13 patch 4 — short-circuit blocked tickers
+    if symbol in _FMP_BLOCKED_TICKERS:
+        return None
+    
     url = f"{FMP_BASE_URL}/{endpoint}"
     params = {"symbol": symbol, "apikey": FMP_API_KEY}
     if extra_params:
@@ -82,6 +98,13 @@ def fmp_get(endpoint, symbol, extra_params=None):
             if isinstance(data, dict) and data.get('Error Message'):
                 return None
             return data
+        elif resp.status_code == 402:
+            # §May 13 patch 4 — Payment Required: this ticker requires a higher FMP plan tier.
+            # Cache this ticker so further endpoint calls for it skip the API entirely.
+            if symbol not in _FMP_BLOCKED_TICKERS:
+                print(f"      FMP 402 for {endpoint}?symbol={symbol} — caching {symbol} as blocked (plan tier)")
+                _FMP_BLOCKED_TICKERS.add(symbol)
+            return None
         else:
             print(f"      FMP {resp.status_code} for {endpoint}?symbol={symbol}")
             return None
@@ -260,7 +283,7 @@ def fetch_financial_scores_fmp(ticker):
 
 def fetch_grades_consensus_fmp(ticker):
     """FMP upgrades-downgrades-consensus — analyst sentiment distribution"""
-    data = fmp_get("upgrades-downgrades-consensus", ticker)
+    data = fmp_get("grades-consensus", ticker)
     if data and isinstance(data, list):
         return {
             'strongBuy': data[0].get('strongBuy'),
@@ -281,16 +304,139 @@ def fetch_dcf_fmp(ticker):
 
 
 def fetch_insider_stats_fmp(ticker):
-    """FMP insider-roaster-statistics — insider buying/selling pressure"""
-    data = fmp_get("insider-roaster-statistics", ticker, {"page": "0"})
-    if data and isinstance(data, list):
-        return {
-            'year': data[0].get('year'),
-            'quarter': data[0].get('quarter'),
-            'purchases': data[0].get('purchases'),
-            'sales': data[0].get('sales')
+    """
+    FMP insider-trading/search — raw insider transactions, parsed locally.
+    
+    Fetches all insider transactions for a ticker, then aggregates P-Purchase
+    and S-Sale transactions over last 30 days into signal fields used by
+    regime_classifier, monte_carlo, and sentiment.
+    
+    Other transaction types (A-Award, M-Exempt, F-InKind, etc) are filtered out
+    as they are mechanical/compensation events, not directional signals.
+    
+    Backward-compat fields preserved (consumed by monte_carlo + sentiment):
+      - acquiredDisposedRatio (float, 0=all selling, 1=all buying, 0.5=balanced)
+      - change ('increasing' | 'decreasing' | 'neutral')
+    
+    New fields for regime classifier:
+      - purchases_30d, sales_30d (counts)
+      - purchases_value_30d, sales_value_30d (USD)
+      - net_direction ('buying' | 'selling' | 'neutral')
+      - cluster (bool: >=3 unique insiders same direction)
+      - unique_buyers, unique_sellers (counts)
+      - most_recent_date (YYYY-MM-DD)
+      - most_senior_buyer, most_senior_seller (highest title in last 30d)
+    """
+    data = fmp_get("insider-trading/search", ticker)
+    if not data or not isinstance(data, list):
+        return {}
+    
+    cutoff = datetime.now() - timedelta(days=30)
+    purchases = []
+    sales = []
+    
+    for tx in data:
+        ttype = tx.get('transactionType', '')
+        # §regime_classifier — only P-Purchase and S-Sale carry directional signal
+        if ttype != 'P-Purchase' and ttype != 'S-Sale':
+            continue
+        
+        tx_date_str = tx.get('transactionDate')
+        if not tx_date_str:
+            continue
+        try:
+            tx_date = datetime.strptime(tx_date_str, '%Y-%m-%d')
+        except (ValueError, TypeError):
+            continue
+        
+        # §regime_classifier — last 30 days only (signals decay)
+        if tx_date < cutoff:
+            continue
+        
+        shares = tx.get('securitiesTransacted', 0) or 0
+        price = tx.get('price', 0) or 0
+        value = shares * price
+        
+        record = {
+            'date': tx_date_str,
+            'name': tx.get('reportingName', ''),
+            'title': tx.get('typeOfOwner', ''),
+            'shares': shares,
+            'price': price,
+            'value': value,
         }
-    return {}
+        
+        if ttype == 'P-Purchase':
+            purchases.append(record)
+        else:
+            sales.append(record)
+    
+    # Aggregate
+    purchases_count = len(purchases)
+    sales_count = len(sales)
+    purchases_value = sum(p['value'] for p in purchases)
+    sales_value = sum(s['value'] for s in sales)
+    
+    # Net direction is VALUE-weighted (not count-weighted): a large CEO sale
+    # carries more signal than 5 director gifts
+    total_value = purchases_value + sales_value
+    if total_value == 0:
+        net_direction = 'neutral'
+        ratio = 0.5  # monte_carlo treats 0.5 as neutral midpoint
+    else:
+        ratio = purchases_value / total_value  # 0=all selling, 1=all buying
+        if ratio > 0.6:
+            net_direction = 'buying'
+        elif ratio < 0.4:
+            net_direction = 'selling'
+        else:
+            net_direction = 'neutral'
+    
+    # §regime_classifier — cluster detection: >=3 unique insiders same direction
+    unique_buyers = len({p['name'] for p in purchases})
+    unique_sellers = len({s['name'] for s in sales})
+    cluster = unique_buyers >= 3 or unique_sellers >= 3
+    
+    # Seniority rank for "most senior actor" in each direction
+    def seniority_rank(title):
+        t = (title or '').lower()
+        if 'chief executive' in t or 'ceo' in t:
+            return 4
+        if 'chief financial' in t or 'cfo' in t:
+            return 3
+        if 'officer' in t:
+            return 2
+        if 'director' in t:
+            return 1
+        return 0
+    
+    most_senior_buyer = max(purchases, key=lambda x: seniority_rank(x['title']), default=None)
+    most_senior_seller = max(sales, key=lambda x: seniority_rank(x['title']), default=None)
+    
+    all_records = purchases + sales
+    most_recent_date = max((r['date'] for r in all_records), default=None)
+    
+    # Backward-compat 'change' string (sentiment.py prompts use this)
+    change_map = {'buying': 'increasing', 'selling': 'decreasing', 'neutral': 'neutral'}
+    
+    return {
+        # Backward-compat fields
+        'acquiredDisposedRatio': ratio,
+        'change': change_map[net_direction],
+        
+        # New rich fields
+        'purchases_30d': purchases_count,
+        'sales_30d': sales_count,
+        'purchases_value_30d': purchases_value,
+        'sales_value_30d': sales_value,
+        'net_direction': net_direction,
+        'cluster': cluster,
+        'unique_buyers': unique_buyers,
+        'unique_sellers': unique_sellers,
+        'most_recent_date': most_recent_date,
+        'most_senior_buyer': most_senior_buyer['title'] if most_senior_buyer else None,
+        'most_senior_seller': most_senior_seller['title'] if most_senior_seller else None,
+    }
 
 
 # =============================================================
@@ -314,6 +460,52 @@ def fetch_economic_calendar():
     except Exception as e:
         print(f"   ⚠️  Economic calendar fetch failed: {e}")
     return []
+
+
+def fetch_sector_performance():
+    """
+    FMP historical-sector-performance — last 10 days of sector returns.
+    Used by regime_classifier to compute per-stock sector decoupling.
+    
+    FMP requires explicit `sector` param per call. We loop over the 11 GICS
+    sectors and aggregate results. Date params required — without them, FMP
+    returns stale 2024 data.
+    
+    Returns list of {date, sector, exchange, averageChange} or empty list.
+    """
+    today = datetime.now().strftime("%Y-%m-%d")
+    start_date = (datetime.now() - timedelta(days=10)).strftime("%Y-%m-%d")
+    
+    # §regime_classifier.sector_benchmarks — GICS sectors per FMP naming
+    SECTORS = [
+        "Technology", "Communication Services", "Consumer Cyclical",
+        "Consumer Defensive", "Healthcare", "Financial Services",
+        "Industrials", "Energy", "Basic Materials", "Utilities", "Real Estate"
+    ]
+    
+    url = f"{FMP_BASE_URL}/historical-sector-performance"
+    all_rows = []
+    
+    for sector in SECTORS:
+        params = {
+            "sector": sector,
+            "from": start_date,
+            "to": today,
+            "apikey": FMP_API_KEY
+        }
+        time.sleep(API_DELAY)
+        try:
+            resp = requests.get(url, params=params, timeout=API_TIMEOUT)
+            if resp.status_code == 200:
+                data = resp.json()
+                if isinstance(data, list):
+                    all_rows.extend(data)
+            else:
+                print(f"   ⚠️  Sector performance ({sector}): HTTP {resp.status_code}")
+        except Exception as e:
+            print(f"   ⚠️  Sector performance fetch failed for {sector}: {e}")
+    
+    return all_rows
 
 
 def fetch_vix():
@@ -761,4 +953,8 @@ def fetch_portfolio_data():
     macro_events = fetch_economic_calendar()
     print(f"   📅 {len(macro_events)} macro events in next 60 days")
 
-    return portfolio_data, macro_events
+    # Fetch sector performance (1 call, used by regime_classifier)
+    sector_perf = fetch_sector_performance()
+    print(f"   🏭 {len(sector_perf)} sector performance rows")
+
+    return portfolio_data, macro_events, sector_perf

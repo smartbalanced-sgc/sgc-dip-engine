@@ -30,7 +30,7 @@ def get_currency_symbol(ticker, portfolio_data=None):
     """Return € for European stocks and ASML (displayed in EUR), £ for UK, $ otherwise."""
     if ticker.endswith('.MI') or ticker == 'ASML':  # Session 3: ASML displays in EUR
         return '€'
-    elif ticker.endswith('.L'):
+    elif ticker.endswith('.L') or ticker.endswith('.GB'):
         return '£'
     else:
         return '$'
@@ -49,8 +49,9 @@ def get_trading212_url(ticker):
         'LDO.MI': 'LDO.IT',     # Milan
         'IGLN.L': 'IGLN.GB',    # London — iShares Physical Gold ETC
         'ASML':   'ASML.NL',    # Amsterdam-listed (we model USD ADR; T212 routes EU)
+        'RR.GB':  'RR.GB',      # London — Rolls-Royce (suffix already in ticker)
+        'BARC.GB':'BARC.GB',    # London — Barclays (suffix already in ticker)
         # Add more mappings here as portfolio expands:
-        # 'BARC.L': 'BARC.GB',
         # 'FMNB.DE': 'FMNB.DE',
     }
     base = "https://www.trading212.com/trading-instruments/invest"
@@ -97,9 +98,11 @@ def _bucket_tickers(by_ticker):
 
 
 def generate_html(execution_data, macro_regime, vix, portfolio_data,
-                  warnings=None, backtest_results=None):
+                  warnings=None, backtest_results=None, regime_results=None):
     if warnings is None:
         warnings = []
+    if regime_results is None:
+        regime_results = {}
 
     # Get current time in London timezone (BST/GMT)
     london_tz = timezone('Europe/London')
@@ -129,6 +132,32 @@ def generate_html(execution_data, macro_regime, vix, portfolio_data,
             </details>
         </div>
         """
+
+    # §May 13 patch B — Collapsible explainer for dip vs rally conviction percentages.
+    # Resolves the confusion that 70% dip + 60% rally seems > 100%.
+    # In reality, they're independent measurements: a single path can both dip AND rally.
+    explainer_html = """
+        <div class="explainer">
+            <details>
+                <summary>ℹ️ How to read Dip / Rally conviction — click to expand</summary>
+                <div class="explainer-body">
+                    <p><strong>Dip conviction (e.g. 70%):</strong> the % of simulated 60-day paths
+                       where the stock touched the dip price or lower at SOME point during the window.
+                       Used for setting limit buys at expected lows.</p>
+                    <p><strong>Rally conviction (e.g. 60%):</strong> the % of simulated paths where the
+                       stock touched the rally price or higher at SOME point during the window.
+                       Used for setting take-profit alerts.</p>
+                    <p><strong>Why can they add to more than 100%?</strong> Both percentages measure
+                       OVERLAPPING subsets of the same paths — a single path can both dip deeply
+                       <em>and</em> rally high within 60 days. Measurements are independent, not mutually exclusive.</p>
+                    <p><strong>How does ⚠️ regime override work?</strong> When the regime classifier flags
+                       a stock as MOMENTUM, SQUEEZE_RISK, or BREAKDOWN, the dip target is annotated
+                       as "unlikely to fill" because Monte Carlo's historical-volatility assumption
+                       isn't valid in those regimes. Trust the regime warning over the dip prediction.</p>
+                </div>
+            </details>
+        </div>
+    """
 
     # §Session 2: Backtest results section — COLLAPSED by default (click to expand)
     backtest_html = ""
@@ -242,13 +271,20 @@ def generate_html(execution_data, macro_regime, vix, portfolio_data,
         dip_pct = data.get('dip_pct', 0)
         dip_display = f"{dip_pct*100:.1f}%"
 
+        # §May 13 patch A — when regime suppressed the BUY, dip target is unreliable.
+        # Annotate so trader doesn't act on the Monte Carlo prediction.
+        # Regime classifier rules out dip-fill in MOMENTUM/SQUEEZE_RISK/BREAKDOWN.
+        regime_for_dip = data.get('regime', 'NORMAL')
+        regime_suppress_dip = regime_for_dip in ('MOMENTUM', 'SQUEEZE_RISK', 'BREAKDOWN')
+        dip_override_suffix = " — ⚠️ regime override: unlikely to fill" if regime_suppress_dip else ""
+
         # Target display with correct currency
         if data.get('_no_dip') or data.get('reason_code') == 'no_dip':
             target_display = "No dip expected in window"
         elif data.get('reason_code') == 'immaterial':
             target_display = f"⬇️ {ccy}{data['target_price']:.2f} · {data['date_range']} ({dip_display} — immaterial)"
         else:
-            target_display = f"⬇️ {ccy}{data['target_price']:.2f} · {data['date_range']} ({dip_display})"
+            target_display = f"⬇️ {ccy}{data['target_price']:.2f} · {data['date_range']} ({dip_display}{dip_override_suffix})"
 
         # Session 5: Rally line (⬆️ expected rally target, 60% conviction)
         rally_display = ""
@@ -306,6 +342,40 @@ def generate_html(execution_data, macro_regime, vix, portfolio_data,
         # Trading 212 hyperlink for ticker (opens in new tab)
         t212_url = get_trading212_url(ticker)
 
+        # §May 13: Regime badge rendering
+        regime = data.get('regime', 'NORMAL')
+        regime_confidence = data.get('regime_confidence', 0)
+        regime_note = data.get('regime_note', '')
+        regime_overrode = data.get('regime_overrode', False)
+        regime_ai = data.get('regime_ai_research', {}) or {}
+        
+        regime_badge_html = ''
+        regime_note_html = ''
+        if regime != 'NORMAL':
+            regime_styles = {
+                'MOMENTUM': ('regime-momentum', '🚀 MOMENTUM'),
+                'SQUEEZE_RISK': ('regime-squeeze', '⚠️ SQUEEZE RISK'),
+                'OVERSOLD_REVERSAL': ('regime-oversold', '💎 OVERSOLD'),
+                'BREAKDOWN': ('regime-breakdown', '📉 BREAKDOWN'),
+            }
+            css_class, label = regime_styles.get(regime, ('regime-normal', regime))
+            ai_indicator = ' ✨' if regime_ai.get('researched_at') else ''
+            regime_badge_html = (
+                f'<span class="regime-badge {css_class}" '
+                f'title="{regime_note[:200]}">'
+                f'{label} {regime_confidence:.0%}{ai_indicator}</span>'
+            )
+            
+            if regime_note:
+                ai_extra = ''
+                if regime_ai.get('short_interest') and regime_ai['short_interest'] != 'not found':
+                    ai_extra = f' Short interest: {regime_ai["short_interest"]}.'
+                regime_note_html = (
+                    f'<div class="regime-note">'
+                    f'<span class="regime-note-prefix">REGIME:</span> {regime_note}{ai_extra}'
+                    f'</div>'
+                )
+
         table_rows += f"""
         <tr>
             <td class="ticker"><a href="{t212_url}" target="_blank" rel="noopener noreferrer" class="ticker-link" title="Open {ticker} on Trading 212">{ticker}</a> {stock_warn}</td>
@@ -314,12 +384,14 @@ def generate_html(execution_data, macro_regime, vix, portfolio_data,
                     <span class="signal-icon">{signal_icon}</span>
                     <span class="signal-text">{data['signal']}</span>
                     {rsi_display}
+                    {regime_badge_html}
                 </div>
                 <div class="price-row">{ccy}{display_price:.2f} (today)</div>
                 <div class="target-row">{target_display}</div>
                 <div class="target-row" style="color: #4ade80;">{rally_display}</div>
                 <div class="confidence-row">{conviction_display}</div>
                 <div class="oneliner">{data['one_liner']}</div>
+                {regime_note_html}
                 {fallback_html}
                 {ai_badge}
                 <div class="consensus-row">{consensus_display}</div>
@@ -472,6 +544,17 @@ def generate_html(execution_data, macro_regime, vix, portfolio_data,
         }}
         .earnings {{ text-align: center; font-weight: 500; }}
 
+        .explainer {{
+            background: #1a1f2e; border: 1px solid #2d3548;
+            border-radius: 6px; padding: 10px 14px; margin: 12px 0;
+        }}
+        .explainer summary {{
+            cursor: pointer; color: #88a0c8; font-weight: 600;
+            font-size: 0.9em; padding: 2px 0;
+        }}
+        .explainer-body {{ padding-top: 8px; color: #c0c5d0; font-size: 0.88em; }}
+        .explainer-body p {{ margin: 6px 0; line-height: 1.5; }}
+        .explainer-body strong {{ color: #d4dae0; }}
         .stock-warn {{ margin-left: 5px; }}
         .rsi {{
             font-size: 0.75em; padding: 2px 8px; border-radius: 4px;
@@ -479,6 +562,26 @@ def generate_html(execution_data, macro_regime, vix, portfolio_data,
         }}
         .rsi-high {{ background: #4a1a1a; color: #ff6b6b; }}
         .rsi-low {{ background: #1a3a1a; color: #66bb6a; }}
+
+        /* §May 13: Regime classifier badges */
+        .regime-badge {{
+            font-size: 0.7em; padding: 2px 8px; border-radius: 4px;
+            margin-left: 8px; font-weight: 700; letter-spacing: 0.5px;
+            cursor: help;
+        }}
+        .regime-momentum {{ background: #3a2d1a; color: #ffa726; }}
+        .regime-squeeze {{ background: #4a1a1a; color: #ff6b6b; }}
+        .regime-oversold {{ background: #1a3a3a; color: #4ade80; }}
+        .regime-breakdown {{ background: #1a1a2d; color: #a0a5b0; }}
+        .regime-normal {{ background: #2d3548; color: #a0a5b0; }}
+        .regime-note {{
+            background: #1f1a0a; border-left: 3px solid #ffa726;
+            padding: 6px 10px; margin-top: 8px; border-radius: 4px;
+            font-size: 0.82em; color: #c0b090;
+        }}
+        .regime-note-prefix {{
+            color: #ffa726; font-weight: 700; letter-spacing: 0.5px;
+        }}
 
         .run-btn {{
             display: inline-block; padding: 6px 18px; background: #4a9eff;
@@ -511,6 +614,7 @@ def generate_html(execution_data, macro_regime, vix, portfolio_data,
         </div>
 
         {warning_html}
+        {explainer_html}
 
         {backtest_html}
 
