@@ -311,7 +311,27 @@ def extract_statistics(paths, current_price):
     # Terminal price (where stock ends at Day 60)
     terminal_prices = paths[:, -1]
     terminal_median = float(np.median(terminal_prices))
-    
+
+    # §May 14 daily probability bands feature — per-day percentile evolution
+    # §signal.percentile_target — dip conviction (default 70)
+    # §signal.rally_conviction_percentile — rally conviction (default 60)
+    # Lower band: dip_conviction% of paths sit at-or-above this price on Day N
+    #   → 30th percentile of Day-N prices when dip_conviction=70
+    # Upper band: rally_conviction% of paths sit at-or-below this price on Day N
+    #   → 60th percentile of Day-N prices when rally_conviction=60
+    # NOTE: arg asymmetry vs. headline rally target above is intentional.
+    # Headline rally uses (100 - rally_conviction) on the MAXIMA distribution;
+    # daily bands use rally_conviction directly on per-day PRICE distributions.
+    # Different statistics, different framing — see 04_NEXT_BUILD_SPEC.md wrinkle.
+    dip_conviction = get_config('signal', 'percentile_target', default=70)
+    rally_conviction = get_config('signal', 'rally_conviction_percentile', default=60)
+    daily_lower = np.percentile(paths, 100 - dip_conviction, axis=0)
+    daily_upper = np.percentile(paths, rally_conviction, axis=0)
+    daily_bands = [
+        {'day': i + 1, 'lower': float(daily_lower[i]), 'upper': float(daily_upper[i])}
+        for i in range(len(daily_lower))
+    ]
+
     return {
         'percentile_low': percentile_low,
         'confidence': confidence,
@@ -323,7 +343,8 @@ def extract_statistics(paths, current_price):
         'rally_60': rally_target,           # Primary rally target (conviction from config)
         'rally_70': rally_conservative,     # Conservative rally target
         'rally_date_index': rally_date_index,
-        'terminal_median': terminal_median
+        'terminal_median': terminal_median,
+        'daily_bands': daily_bands,  # §May 14 daily probability bands feature
     }
 
 
@@ -416,6 +437,18 @@ def simulate_portfolio(portfolio_data, corr_matrix, ticker_order, regime_info, m
 
         stats = extract_statistics(paths, data['current_price'])
 
+        # TEMP: Wave 1 verification print — REMOVE before merge to main
+        if ticker == 'MU':
+            db = stats['daily_bands']
+            spread_d1 = db[0]['upper'] - db[0]['lower']
+            spread_d60 = db[-1]['upper'] - db[-1]['lower']
+            print(f"[WAVE1] MU current_price: ${data['current_price']:.2f}")
+            print(f"[WAVE1] MU daily_bands[0]: {db[0]}")
+            print(f"[WAVE1] MU daily_bands[-1]: {db[-1]}")
+            print(f"[WAVE1] MU spread Day 1: ${spread_d1:.2f}, Day 60: ${spread_d60:.2f}")
+            print(f"[WAVE1] MU len(daily_bands): {len(db)}")
+            print(f"[WAVE1] MU monotonic lower<upper: {all(d['lower'] < d['upper'] for d in db)}")
+
         results[ticker] = {
             'current_price': data['current_price'],
             'percentile_low': stats['percentile_low'],
@@ -429,6 +462,7 @@ def simulate_portfolio(portfolio_data, corr_matrix, ticker_order, regime_info, m
             'rally_70': stats['rally_70'],
             'rally_date_index': stats['rally_date_index'],
             'terminal_median': stats['terminal_median'],
+            'daily_bands': stats['daily_bands'],  # §May 14 daily probability bands feature — propagate to dashboard consumer
             'paths': paths
         }
 
