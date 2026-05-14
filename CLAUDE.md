@@ -101,7 +101,7 @@ The following are locked decisions. Do not "improve" them. Do not "modernize" th
 - **Regime classifier thresholds** are tuned to current market behavior. Do not loosen them without backtest evidence.
 
 ### Data Sources
-- **FMP Starter plan only** — `.L` and `.GB` tickers (IGLN.L, RR.GB, BARC.GB) return 402 and are correctly skipped via early-return caching. Do not try to "fix" this — it requires plan upgrade.
+- **FMP Starter plan only** — `.L` and `.GB` tickers (IGLN.L, RR.GB) return 402 and are correctly skipped via early-return caching. Do not try to "fix" this — it requires plan upgrade.
 - **LDO.MI uses Eulerpool only** (FMP returns 402 on .MI)
 - **Anthropic SDK must use lazy initialization** inside `get_client()` — module-level init causes import-time crashes
 - **yfinance dividend yield is in percent, not decimal** — there is a known correction in the code; do not remove it
@@ -167,10 +167,10 @@ Before EVERY commit:
 - `ANTHROPIC_API_KEY`
 - `EULERPOOL_TOKEN`
 
-### Current Portfolio (41 tickers as of 2026-05-14)
+### Current Portfolio (40 tickers as of 2026-05-14)
 **Modeled (~38):** NVDA, MSFT, GOOGL, META, AMZN, MA, WM, MU, ASML, AVGO, CTAS, VST, CEG, LDO.MI, TSLA, INOD, ADP, V, LLY, LIN, WMT, PLTR, AMD, INTC, SNDK, ENGN, AIIO, GDC, FWRD, HUBS, CRWD, CSCO, SNAL, ALP, QUCY, IONQ, AMAT, ANET
 
-**Skipped (3 — FMP plan limitation):** IGLN.L, RR.GB, BARC.GB
+**Skipped (2 — FMP plan limitation):** IGLN.L, RR.GB
 
 > Note on "Modeled (~36)": exact runtime count varies. Volatility-gate exclusions
 > typically remove 4-6 small caps each run (recent excludes: ENGN, INOD, GDC,
