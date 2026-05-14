@@ -47,6 +47,12 @@ portfolio:
     - CRWD
     - RR.GB
     - BARC.GB
+    - CSCO
+    - SNAL
+    - AIIO
+    - ALP
+    - QUCY
+    - IONQ
   
   # Portfolio weights (Constitution v7)
   # Used for display and future weighted correlation
