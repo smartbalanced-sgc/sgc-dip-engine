@@ -38,7 +38,7 @@ When Jesse starts a ticker-management session:
 1. **Read `CLAUDE.md`** to confirm general rules.
 2. **Read this file** in full.
 3. **Read `docs/handover/01_SESSION_CONTEXT.md`** to confirm current state.
-4. **Run `git status` and `git log --oneline -3`** to confirm clean working tree on main.
+4. **Run `git status` and `git log --oneline -3`** to confirm clean working tree.
 5. **`git fetch origin && git pull origin main`** to ensure up to date.
 6. **First response to Jesse:**
    - Confirm protocol read
@@ -47,7 +47,33 @@ When Jesse starts a ticker-management session:
    - Ask "Which ticker(s)?"
    - End with #End
 
-That's the entire opening. No fluff.
+That's the entire opening. No fluff. **DO NOT** ask Jesse anything about
+branches, commit destinations, or workflow — those are answered by the
+"Branch handling" subsection below. Anything not covered there: ask once,
+then proceed.
+
+### Branch handling (web sessions)
+
+The Claude Code web harness automatically assigns a feature branch
+(`claude/...-XYZ`) for every session. **This is workspace, not destination.**
+
+**The pattern, applied automatically without asking:**
+
+1. Make ticker edits on the harness-assigned branch
+2. Commit with the standard message format (see "Commit and push" section)
+3. `git push origin <harness-branch>` to push the branch
+4. `git checkout main && git pull origin main` to sync
+5. `git merge --ff-only <harness-branch>` to fast-forward main
+6. `git push origin main` to publish
+7. `git checkout <harness-branch>` to return to the harness workspace
+
+If main has diverged (someone else committed since fetch — likely the
+daily cron at 21:30 UTC), surface it and ask before merging:
+
+> "STOP: main has new commits since I started. {summary}. Pull and retry?"
+
+For local-on-MacBook sessions (no harness branch), just commit and push
+to main directly — same end-state, fewer steps.
 
 ---
 
@@ -100,7 +126,22 @@ Determine which buckets apply:
 | **No analyst coverage** | Small caps, recent IPOs, niche names | Analyst consensus row will be blank in dashboard; sentiment.py prioritization will downrank |
 
 ### 4. Flag risks to Jesse and ask confirmation
-**Always flag before adding** if the ticker hits any of these buckets:
+
+> ## ⛔ THE ZERO-QUESTION RULE
+>
+> **A ticker with zero risk flags gets added/removed WITHOUT asking Jesse anything.**
+>
+> No "Proceed?". No "Confirm?". No "Sound good?". No "OK to proceed?".
+> Just do the work and report the result in one line.
+>
+> Asking Jesse to confirm a clean US large-cap add (e.g., AMAT, ANET, MSFT,
+> CSCO, FIX, MRNA) is a **protocol violation**. It wastes a round-trip on
+> a known-good operation. Don't do it.
+>
+> Only ask when one of the risk-flag buckets below is actually triggered.
+
+**Risk-flag buckets — these (and ONLY these) require a one-line question + yes/no:**
+
 - Plan-blocked → "FMP will block this; the system will skip it. Proceed anyway?"
 - Eulerpool-only → "FMP won't fetch; Eulerpool token required. Proceed?"
 - Small cap → "Likely high volatility, may be excluded from Monte Carlo by the
@@ -119,7 +160,7 @@ that this ticker carries known risk.
 
 If Jesse says no: skip that ticker, move to the next.
 
-For removes: skip these checks entirely (just remove cleanly).
+For removes: skip these checks entirely (just remove cleanly, no questions).
 
 ---
 
@@ -218,6 +259,56 @@ If he provides them in multiple separate requests, commit each separately.
 
 ---
 
+## 🛑 Never self-proceed (CRITICAL)
+
+If a hook fires, a stop-event triggers, or a tool emits a "please commit"
+message **while you are mid-question waiting for Jesse's reply**, you must
+**HOLD** and wait. Do not commit, do not push, do not "clear the hook"
+by approving your own pending question.
+
+Specifically forbidden:
+
+- Asking Jesse "(a) or (b)?", then proceeding with (a) on your own to
+  silence a stop-hook
+- Receiving a hook reminder about uncommitted changes and committing them
+  without explicit Jesse approval
+- Deciding to "default to a sensible option" because waiting feels awkward
+
+If a hook genuinely needs to be cleared and Jesse is unresponsive, the
+correct action is to surface the conflict and wait:
+
+> "STOP: stop-hook fired about uncommitted changes, and I'm still waiting
+> for your answer to the (a)/(b) question above. I won't proceed until
+> you reply. The uncommitted state is safe — no data lost."
+>
+> #End
+
+Self-proceeding to silence a hook is the same class of error as
+auto-applying edits in "Accept edits" mode. SGC trades real money. Don't
+do it.
+
+### Sacred-section adjacent edits — current pattern is correct
+
+If a ticker change requires touching a section of CLAUDE.md beyond the
+"Current Portfolio" line — e.g., updating the Sacred Decisions plan-blocked
+example list when removing a `.GB` ticker — **pause and ask Jesse before
+committing.** This is the right behavior; the test session demonstrated it
+correctly with the BARC.GB removal.
+
+Format:
+
+> "Holding before commit — I also touched line {N} in {section} ({brief
+> reason}). That's beyond strict ticker-count update. Want me to:
+> (a) keep the edit (factually tied to this removal), or
+> (b) revert it and leave the parenthetical stale for now?"
+>
+> #End
+
+Then **wait for Jesse's reply.** Do not proceed without it. If a hook
+fires while waiting, see the "Never self-proceed" section above.
+
+---
+
 ## 🚦 Stop conditions — refuse to push
 
 Pause and surface to Jesse BEFORE pushing if any of:
@@ -276,7 +367,7 @@ That's the bar. No exposition.
 
 **Jesse:** Add Cisco
 
-**You:**
+**You: ZERO questions to Jesse — no "Proceed?", no "Confirm?".** Just do the work.
 1. Resolve: Cisco → CSCO
 2. Pre-flight: not in portfolio ✓, US large cap ✓, no flags
 3. Edit config.yaml (append `- CSCO` to portfolio.tickers)
@@ -284,10 +375,14 @@ That's the bar. No exposition.
 5. Verify YAML
 6. Commit + push
 
-**Response to Jesse:**
-> Added CSCO (Cisco Systems). config.yaml + CLAUDE.md updated. Commit `abc1234` pushed.
+**Response to Jesse (the FIRST and ONLY thing you say):**
+> Added CSCO (Cisco Systems). config.yaml + CLAUDE.md updated. Commit `abc1234` ff-merged into main and pushed.
 >
 > #End
+
+This is the canonical "clean add" response. **Do not deviate.** If you find
+yourself about to type "Proceed?" or "Sound good?" on a flag-free ticker,
+stop and reread the Zero-Question Rule.
 
 ### Example 2 — Add with risk flag
 
