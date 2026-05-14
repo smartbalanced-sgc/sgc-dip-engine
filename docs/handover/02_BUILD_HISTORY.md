@@ -1,11 +1,45 @@
-# 02_BUILD_HISTORY.md — What Was Built In The Previous Session
+# 02_BUILD_HISTORY.md — What Was Built In Previous Sessions
 
 > **Purpose:** Chronological record of what was built, what bugs were caught, what was decided. This is the "what" — see `03_RATIONALE_AND_NUANCES.md` for the "why."
 > **Read this SECOND** after `01_SESSION_CONTEXT.md`.
 
 ---
 
-## 🏗️ Session Overview
+## 🏗️ Session — May 14, 2026 (most recent)
+
+**Date:** May 14, 2026
+**Duration:** ~6 hours
+**Net result:** Four commits shipped, branch merged to main.
+
+### What shipped
+
+- **Wave 1 (`ad3b1c7`):** `daily_bands` computation added to `extract_statistics()` in `src/monte_carlo.py`. Config-driven percentiles (uses `signal.percentile_target` and `signal.rally_conviction_percentile`). Propagated through `simulate_portfolio()` and into `execution_logic.py`'s `execution_data` dict.
+- **Wave 2 (`8842d9e`):** Per-stock collapsible daily probability bands `<details>` block in `src/dashboard_generator.py`. Lower 70% and Upper 60% columns + spread + calendar dates. Preamble explicitly flags the wrinkle that Day-60 lower will NOT match the headline dip target (different statistics).
+- **Research backtest tool (`8842d9e`):** `research/regime_backtest.py` (~725 LOC). Standalone, on-demand. Evaluates 4 rule variants on portfolio + S&P 100 universes. Test A (forward returns) and Test B (dip-fill rate). Welch t-test, Cohen's d, Bonferroni correction.
+- **Test B fix + research evidence archive (`efbff25`):** Fixed Test B dip-fill rate bug (was returning all zeros due to MultiIndex date dtype mismatch). New `docs/research/` archive folder with README setting policy + dated verdict snapshot for the 2026-05-14 backtest run.
+- **Cleanup merge (`f548a58`):** Integrated Jesse's manual config.yaml additions (CSCO, SNAL, ALP, QUCY, IONQ), removed accidental AIIO duplicate, resolved .gitignore conflict from the recurring `src/__pycache__/` corruption.
+
+### Verdict on regime classifier rule
+
+After empirical investigation: **do not change the production rule (R0).** On the portfolio universe, R0 separates MOMENTUM from NORMAL forward returns at +7.95pp / t=4.09 / d=0.30 at 20-day horizon. On the broader S&P 100 universe, the long-term signal collapses (R0 at +20d: −1.18pp), consistent with the academic literature on short-term momentum / medium-term reversal. The rule serves its actual purpose (short-term WAIT-override) adequately. No alternative is decisively better. See `docs/research/2026-05-14_regime_classifier_backtest.md` for full evidence.
+
+### Forward evaluation set
+
+- **2026-06-13:** re-run `research/regime_backtest.py` to evaluate the MU live prediction logged on 2026-05-14 (MU labelled NORMAL despite RSI 81 / +20% 5d).
+
+### Configuration changes
+
+- 5 new tickers added: CSCO, SNAL, ALP, QUCY, IONQ (manual edit by Jesse on main, commit `d3c321e`).
+- Portfolio count: 34 → 39 tickers (modeled ~36, plan-skipped 3).
+
+### Bugs caught and fixed
+
+1. **Test B all-zero results:** MultiIndex-based join in `run_test_b()` failed silently due to tz-aware (yfinance) vs tz-naive (CSV) date dtype mismatch. Replaced with explicit pandas merge after date normalization. Also corrected dip-fill detection to use minimum close in 20-day window rather than terminal return.
+2. **`.gitignore` re-corruption:** `src/__pycache__/` reappeared as 6 duplicate lines on main. Investigated and traced to `.github/workflows/daily_run.yml` line 53 (`echo "src/__pycache__/" >> .gitignore`) — appends on every cron run. Fix proposed to remove the redundant echo entirely (the entry is already covered by line 2 of `.gitignore`).
+
+---
+
+## 🏗️ Session — May 13, 2026
 
 **Date:** May 13, 2026
 **Duration:** ~12 hours

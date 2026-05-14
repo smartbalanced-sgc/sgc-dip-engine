@@ -167,10 +167,16 @@ Before EVERY commit:
 - `ANTHROPIC_API_KEY`
 - `EULERPOOL_TOKEN`
 
-### Current Portfolio (34 tickers)
-**Modeled (31):** NVDA, MSFT, GOOGL, META, AMZN, MA, WM, MU, ASML, AVGO, CTAS, VST, CEG, LDO.MI, TSLA, INOD, ADP, V, LLY, LIN, WMT, PLTR, AMD, INTC, SNDK, ENGN, AIIO, GDC, FWRD, HUBS, CRWD
+### Current Portfolio (39 tickers as of 2026-05-14)
+**Modeled (~36):** NVDA, MSFT, GOOGL, META, AMZN, MA, WM, MU, ASML, AVGO, CTAS, VST, CEG, LDO.MI, TSLA, INOD, ADP, V, LLY, LIN, WMT, PLTR, AMD, INTC, SNDK, ENGN, AIIO, GDC, FWRD, HUBS, CRWD, CSCO, SNAL, ALP, QUCY, IONQ
 
 **Skipped (3 — FMP plan limitation):** IGLN.L, RR.GB, BARC.GB
+
+> Note on "Modeled (~36)": exact runtime count varies. Volatility-gate exclusions
+> typically remove 4-6 small caps each run (recent excludes: ENGN, INOD, GDC,
+> AIIO, FWRD). The 5 most recent additions (CSCO, SNAL, ALP, QUCY, IONQ) were
+> manually added on 2026-05-14; some may produce data-quality warnings or be
+> excluded by volatility gates on first runs. Verify on next dashboard.
 
 ---
 
@@ -232,7 +238,7 @@ After reading this file, read the handover documentation in order:
 1. **`docs/handover/01_SESSION_CONTEXT.md`** — Where we are, what just shipped, what's next
 2. **`docs/handover/02_BUILD_HISTORY.md`** — What was built in the last session and why
 3. **`docs/handover/03_RATIONALE_AND_NUANCES.md`** — The "why" behind decisions, lessons learned
-4. **`docs/handover/04_NEXT_BUILD_SPEC.md`** — Daily probability bands feature — full spec
+4. **`docs/handover/04_NEXT_BUILD_SPEC_DEPLOYED.md`** — Daily probability bands feature spec (SHIPPED 2026-05-14)
 5. **`docs/handover/05_USER_PROFILE.md`** — Jesse's working style in depth
 6. **`docs/handover/06_SYSTEM_ARCHITECTURE.md`** — Technical map of files, data flow, dependencies
 

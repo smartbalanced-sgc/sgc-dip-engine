@@ -22,13 +22,20 @@ sgc-dip-engine/
 │   └── (other generated files)
 ├── docs/
 │   ├── index.html               ← Published dashboard (GitHub Pages)
-│   └── handover/                ← This handover folder (you are here)
-│       ├── 01_SESSION_CONTEXT.md
-│       ├── 02_BUILD_HISTORY.md
-│       ├── 03_RATIONALE_AND_NUANCES.md
-│       ├── 04_NEXT_BUILD_SPEC.md
-│       ├── 05_USER_PROFILE.md
-│       └── 06_SYSTEM_ARCHITECTURE.md
+│   ├── handover/                ← System as DESIGNED (intent, rationale, sacred)
+│   │   ├── 01_SESSION_CONTEXT.md
+│   │   ├── 02_BUILD_HISTORY.md
+│   │   ├── 03_RATIONALE_AND_NUANCES.md
+│   │   ├── 04_NEXT_BUILD_SPEC_DEPLOYED.md
+│   │   ├── 05_USER_PROFILE.md
+│   │   └── 06_SYSTEM_ARCHITECTURE.md
+│   └── research/                ← System as VALIDATED (empirical evidence)
+│       ├── README.md            ← Archive policy + index of reports
+│       └── YYYY-MM-DD_*.md      ← Dated verdict snapshots
+├── research/                    ← Standalone research scripts (NOT production)
+│   ├── regime_backtest.py       ← Regime classifier rule validation tool
+│   ├── .cache/                  ← yfinance pull cache (gitignored)
+│   └── regime_backtest_report.md← Auto-generated, overwritten each run (gitignored)
 └── src/
     ├── main.py                  ← Orchestrator — entry point
     ├── config.py                ← Config loader + exports
@@ -37,15 +44,18 @@ sgc-dip-engine/
     │   └── config.yaml          ← All thresholds, tickers, weights
     ├── data_fetcher.py          ← FMP + Eulerpool integration
     ├── monte_carlo.py           ← GARCH + correlated 10K-path simulation
+    │                              (also computes daily probability bands)
     ├── hmm_regime.py            ← Macro regime detection (bull/sideways/drawdown)
     ├── macro_regime.py          ← VIX-based macro context
-    ├── regime_classifier.py     ← Trade regime classifier (NEW, the build that just shipped)
+    ├── regime_classifier.py     ← Per-stock trade regime classifier
     ├── execution_logic.py       ← BUY/WAIT signal generation + regime modulation
+    │                              (also propagates daily_bands to dashboard)
     ├── sentiment.py             ← AI catalyst detection + prioritization
     ├── signal_archiver.py       ← CSV archive of daily signals
     ├── dashboard_generator.py   ← HTML dashboard rendering
+    │                              (renders daily probability bands per stock)
     ├── validators.py            ← Gate 1-4 sanity checks
-    └── backtest.py              ← Hit-rate evaluation of past WAIT signals
+    └── backtest.py              ← Daily hit-rate evaluation of past WAIT signals
 ```
 
 ---
@@ -489,9 +499,15 @@ Areas Jesse has flagged for future build phases:
 - AMZN/ASML/AVGO at 40% hit rate suggests classifier may be missing milder momentum cases
 - Need 30+ more days of backtest data before adjusting
 
-### Daily probability bands feature (NEXT — see 04_NEXT_BUILD_SPEC.md)
-- Surface per-day percentile bands in collapsible dashboard tables
-- Display-only, no behavioral changes
+### Daily probability bands feature (SHIPPED 2026-05-14)
+- Implemented in `src/monte_carlo.py` (compute) + `src/execution_logic.py` (propagate) + `src/dashboard_generator.py` (render)
+- Spec archived at `docs/handover/04_NEXT_BUILD_SPEC_DEPLOYED.md`
+- Display-only, no behavioral changes (signal generation, MC, backtest all unchanged)
+
+### Regime classifier rule validation (SHIPPED 2026-05-14)
+- `research/regime_backtest.py` tool, run on-demand
+- See `docs/research/2026-05-14_regime_classifier_backtest.md` for current verdict
+- Next forward eval: 2026-06-13 to evaluate MU prediction
 
 ### Separate swing-trade dashboard
 - If swing trading becomes more frequent, dedicated tooling with premarket prices, position tracking, P&L
