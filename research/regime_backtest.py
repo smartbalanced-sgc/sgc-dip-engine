@@ -253,6 +253,12 @@ def compute_metrics_panel(df, sector_5d):
             fwd[i] = closes[i + h] / closes[i] - 1
         out[f'fwd_{h}d'] = fwd
 
+    # Forward minimum close in 20-day window (for dip-fill detection in Test B)
+    fwd_min_20d = np.full(n, np.nan)
+    for i in range(n - 20):
+        fwd_min_20d[i] = float(np.min(closes[i + 1:i + 21]))
+    out['fwd_min_close_20d'] = fwd_min_20d
+
     return out
 
 
@@ -381,7 +387,11 @@ def run_universe(universe_data, sector_5d, label):
             continue
         for rule in RULE_NAMES:
             labels = apply_rule(panel, rule)
-            slice_df = panel[['fwd_5d', 'fwd_10d', 'fwd_20d']].copy()
+            slice_df = panel[['fwd_5d', 'fwd_10d', 'fwd_20d',
+                              'fwd_min_close_20d']].copy()
+            slice_df['close'] = panel.index.map(
+                lambda d, df=df: float(df.loc[d, 'Close'])
+                if d in df.index else float('nan'))
             slice_df['regime'] = labels
             slice_df['ticker'] = ticker
             rule_panels[rule].append(slice_df)
@@ -420,14 +430,27 @@ def summarise_test_a(rule_data, rule_name):
 # TEST B — DIP-FILL RATE (uses signal_history.csv)
 # =============================================================
 
+def _normalise_date_col(s):
+    """Normalise a date series to tz-naive day-floored Timestamps."""
+    s = pd.to_datetime(s, errors='coerce')
+    try:
+        if getattr(s.dt, 'tz', None) is not None:
+            s = s.dt.tz_localize(None)
+    except (AttributeError, TypeError):
+        pass
+    return pd.to_datetime(s.dt.date)
+
+
 def run_test_b(rule_data_portfolio, signal_history):
     """
     For (ticker, date) observations where signal_history shows WAIT,
     compare MOMENTUM-labelled dip-fill rate vs NORMAL-labelled rate.
 
-    Note: dip-fill detection here approximates production logic —
-    we check whether the dip_target was touched in the following
-    20 trading days (using yfinance close prices, not intraday lows).
+    Dip-fill detection: was the dip_target touched (close-price approximation)
+    at any point in the next 20 trading days? Uses fwd_min_close_20d from the
+    panel — i.e., minimum daily close in the forward 20-day window. This is
+    more conservative than production's intraday-low check; intraday dips that
+    recover by close will be missed. Effect: Test B fill rates biased downward.
     """
     if signal_history is None or signal_history.empty:
         return None
@@ -440,46 +463,52 @@ def run_test_b(rule_data_portfolio, signal_history):
     if wait.empty:
         return None
 
-    wait['date'] = pd.to_datetime(wait['date'])
-    wait_set = set(zip(wait['ticker'].astype(str), wait['date']))
+    wait['date'] = _normalise_date_col(wait['date'])
+    wait['ticker'] = wait['ticker'].astype(str)
+    wait['dip_target'] = pd.to_numeric(wait['dip_target'], errors='coerce')
+    wait = wait.dropna(subset=['date', 'dip_target'])
 
     results = {}
     for rule in RULE_NAMES:
         df = rule_data_portfolio[rule]
-        if df.empty:
+        if df is None or df.empty:
+            results[rule] = {'mom_fill_rate': None, 'mom_n': 0,
+                             'nor_fill_rate': None, 'nor_n': 0}
             continue
-        # Map regime label and forward returns onto each WAIT signal
-        df_idx = df.set_index([df['ticker'], df.index])
-        mom_filled, mom_total = 0, 0
-        nor_filled, nor_total = 0, 0
-        for _, row in wait.iterrows():
-            key = (row['ticker'], row['date'])
-            if key not in df_idx.index:
-                continue
-            regime = df_idx.loc[key, 'regime']
-            fwd_20 = df_idx.loc[key, 'fwd_20d']
-            if pd.isna(fwd_20):
-                continue
-            # Approximate dip-fill: did price touch dip_target in 20d?
-            # Without intraday data we approximate via fwd minimum vs target;
-            # use sign of price ratio relative to target.
-            try:
-                hit = float(row['dip_target']) >= row['current_price'] * (1 + fwd_20)
-            except Exception:
-                continue
-            if regime == 'MOMENTUM':
-                mom_total += 1
-                if hit:
-                    mom_filled += 1
-            else:
-                nor_total += 1
-                if hit:
-                    nor_filled += 1
+
+        panel = df.copy()
+        panel['date'] = _normalise_date_col(pd.Series(panel.index))
+        panel['ticker'] = panel['ticker'].astype(str)
+
+        merged = wait.merge(
+            panel[['ticker', 'date', 'regime',
+                   'fwd_min_close_20d', 'close']],
+            on=['ticker', 'date'],
+            how='inner',
+        )
+        merged = merged.dropna(subset=['fwd_min_close_20d', 'regime'])
+
+        if merged.empty:
+            results[rule] = {'mom_fill_rate': None, 'mom_n': 0,
+                             'nor_fill_rate': None, 'nor_n': 0}
+            continue
+
+        # Dip filled if minimum close in next 20 days is at or below dip target
+        merged['hit'] = merged['fwd_min_close_20d'] <= merged['dip_target']
+
+        mom = merged[merged['regime'] == 'MOMENTUM']
+        nor = merged[merged['regime'] == 'NORMAL']
+
+        mom_n = int(len(mom))
+        nor_n = int(len(nor))
+        mom_fr = float(mom['hit'].mean()) if mom_n else None
+        nor_fr = float(nor['hit'].mean()) if nor_n else None
+
         results[rule] = {
-            'mom_fill_rate': (mom_filled / mom_total) if mom_total else None,
-            'mom_n': mom_total,
-            'nor_fill_rate': (nor_filled / nor_total) if nor_total else None,
-            'nor_n': nor_total,
+            'mom_fill_rate': mom_fr,
+            'mom_n': mom_n,
+            'nor_fill_rate': nor_fr,
+            'nor_n': nor_n,
         }
     return results
 

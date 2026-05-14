@@ -50,6 +50,8 @@ test_output/
 *.tmp
 src/__pycache__/
 
-# Research artifacts (yfinance pull cache, generated reports)
+# Research artifacts (yfinance pull cache, auto-generated reports).
+# Dated snapshots of verdicts live in docs/research/ — those ARE tracked.
 research/.cache/
 research/__pycache__/
+research/regime_backtest_report.md
