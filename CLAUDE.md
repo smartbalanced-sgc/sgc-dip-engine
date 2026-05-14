@@ -242,6 +242,10 @@ After reading this file, read the handover documentation in order:
 5. **`docs/handover/05_USER_PROFILE.md`** — Jesse's working style in depth
 6. **`docs/handover/06_SYSTEM_ARCHITECTURE.md`** — Technical map of files, data flow, dependencies
 
+**Special-purpose protocols (load only when relevant):**
+
+- **`docs/handover/TICKER_MGMT_PROTOCOL.md`** — Operating procedure for sessions dedicated to portfolio ticker add/remove. Canon rule: a ticker-mgmt session does ONLY ticker additions and deletions, nothing else. If Jesse opens a session described as "ticker management," "stock additions," or similar, load this protocol immediately and follow its rules.
+
 ---
 
 ## 🎯 YOUR FIRST RESPONSE IN A NEW SESSION
