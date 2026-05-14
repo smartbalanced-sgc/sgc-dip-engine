@@ -167,8 +167,8 @@ Before EVERY commit:
 - `ANTHROPIC_API_KEY`
 - `EULERPOOL_TOKEN`
 
-### Current Portfolio (39 tickers as of 2026-05-14)
-**Modeled (~36):** NVDA, MSFT, GOOGL, META, AMZN, MA, WM, MU, ASML, AVGO, CTAS, VST, CEG, LDO.MI, TSLA, INOD, ADP, V, LLY, LIN, WMT, PLTR, AMD, INTC, SNDK, ENGN, AIIO, GDC, FWRD, HUBS, CRWD, CSCO, SNAL, ALP, QUCY, IONQ
+### Current Portfolio (40 tickers as of 2026-05-14)
+**Modeled (~37):** NVDA, MSFT, GOOGL, META, AMZN, MA, WM, MU, ASML, AVGO, CTAS, VST, CEG, LDO.MI, TSLA, INOD, ADP, V, LLY, LIN, WMT, PLTR, AMD, INTC, SNDK, ENGN, AIIO, GDC, FWRD, HUBS, CRWD, CSCO, SNAL, ALP, QUCY, IONQ, AMAT
 
 **Skipped (3 — FMP plan limitation):** IGLN.L, RR.GB, BARC.GB
 

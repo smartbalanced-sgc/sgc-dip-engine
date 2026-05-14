@@ -52,7 +52,8 @@ portfolio:
     - ALP
     - QUCY
     - IONQ
-  
+    - AMAT
+
   # Portfolio weights (Constitution v7)
   # Used for display and future weighted correlation
   weights:
