@@ -53,6 +53,7 @@ portfolio:
     - IONQ
     - AMAT
     - ANET
+    - FIX
 
   # Portfolio weights (Constitution v7)
   # Used for display and future weighted correlation
