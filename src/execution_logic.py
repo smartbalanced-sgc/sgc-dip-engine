@@ -348,6 +348,8 @@ def process_execution_signals(simulation_results, portfolio_data=None, macro_eve
             'regime_overrode': regime_overrode,
             'regime_original_signal': original_signal if regime_overrode else None,
             'regime_ai_research': regime_ai,
+            # §May 14 daily probability bands feature — propagate to dashboard renderer
+            'daily_bands': result.get('daily_bands', []),
         }
 
     return execution_data

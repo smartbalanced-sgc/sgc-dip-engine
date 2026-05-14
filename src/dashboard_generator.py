@@ -242,6 +242,20 @@ def generate_html(execution_data, macro_regime, vix, portfolio_data,
             else -execution_data[t].get('dip_pct', 0),
     ))
 
+    # §May 14 daily probability bands feature — precompute shared trading-day
+    # date sequence (Mon-Fri only, no US holidays — sufficient for display).
+    # All stocks share the same future business-day labels for the 60-day window.
+    def _trading_day_dates(start, n_days):
+        out, cur, count = [], start, 0
+        while count < n_days:
+            cur = cur + timedelta(days=1)
+            if cur.weekday() < 5:
+                out.append(cur)
+                count += 1
+        return out
+    _today = datetime.now()
+    _band_dates = _trading_day_dates(_today, 60)
+
     # Build table rows
     table_rows = ""
     for ticker in sorted_tickers:
@@ -339,6 +353,63 @@ def generate_html(execution_data, macro_regime, vix, portfolio_data,
                 </div>
             '''
 
+        # §May 14 daily probability bands feature — per-stock collapsible cone
+        # Lower band: 70% of paths sit at-or-above on Day N (30th percentile)
+        # Upper band: 60% of paths sit at-or-below on Day N (60th percentile)
+        # These are statistical summaries across 10K paths, NOT daily predictions.
+        # Wrinkle (see 04_NEXT_BUILD_SPEC.md): Day-60 lower will NOT equal the
+        # headline dip target — headline uses minima distribution, daily bands
+        # use per-day price distributions. Different statistics, both valid.
+        daily_bands_html = ''
+        db_list = data.get('daily_bands') or []
+        if db_list:
+            db_rows = []
+            for i, band in enumerate(db_list):
+                day_n = band.get('day', i + 1)
+                lower = band.get('lower', 0.0)
+                upper = band.get('upper', 0.0)
+                spread = upper - lower
+                date_str = _band_dates[i].strftime('%b %d') if i < len(_band_dates) else ''
+                db_rows.append(
+                    f"<tr><td>{day_n}</td><td>{date_str}</td>"
+                    f"<td>{ccy}{lower:.2f}</td><td>{ccy}{upper:.2f}</td>"
+                    f"<td>{ccy}{spread:.2f}</td></tr>"
+                )
+            db_rows_html = "".join(db_rows)
+            dip_conv = PERCENTILE_TARGET
+            up_conv = 100 - 40  # rally conviction is 60 today; if config changes, update
+            daily_bands_html = (
+                '<details class="daily-bands">'
+                '<summary>📊 Daily probability bands (60-day window) — click to expand</summary>'
+                '<div class="db-preamble">'
+                '<p><strong>How to read this:</strong> Each day shows two prices — '
+                f'a <strong>lower band</strong> (~{dip_conv}% of simulated paths are at-or-above '
+                f'this price on that day) and an <strong>upper band</strong> (~60% of paths '
+                'are at-or-below). These are statistical summaries across 10,000 paths, '
+                '<strong>NOT predictions of the actual price on that day</strong>. Different '
+                'paths reach their dip or rally on different days — Day 15\'s bands mix paths '
+                'that bottomed early with paths that bottomed late.</p>'
+                '<p><strong>Do NOT use as a buy-on-day-X signal.</strong> '
+                'The headline dip and rally targets above remain the primary action levels. '
+                'These daily bands are informational only.</p>'
+                '<p><em>Note: the Day 60 lower band will NOT match the headline dip target. '
+                'Those are computed differently — the headline target uses each path\'s '
+                'lowest point across the full 60 days, while these bands use prices on '
+                'specific days. Both are valid; they measure different things.</em></p>'
+                '<p><em>If a regime override warning appears on this stock above, '
+                'those caveats apply here too — the daily descent toward the dip target '
+                'is just as "unlikely to fill" as the target itself.</em></p>'
+                '</div>'
+                '<div class="db-scroll">'
+                '<table class="db-table">'
+                '<thead><tr><th>Day</th><th>Date</th><th>Lower 70%</th>'
+                '<th>Upper 60%</th><th>Spread</th></tr></thead>'
+                f'<tbody>{db_rows_html}</tbody>'
+                '</table>'
+                '</div>'
+                '</details>'
+            )
+
         # Trading 212 hyperlink for ticker (opens in new tab)
         t212_url = get_trading212_url(ticker)
 
@@ -395,6 +466,7 @@ def generate_html(execution_data, macro_regime, vix, portfolio_data,
                 {fallback_html}
                 {ai_badge}
                 <div class="consensus-row">{consensus_display}</div>
+                {daily_bands_html}
             </td>
             <td class="earnings">{earnings_display}</td>
         </tr>
@@ -582,6 +654,43 @@ def generate_html(execution_data, macro_regime, vix, portfolio_data,
         .regime-note-prefix {{
             color: #ffa726; font-weight: 700; letter-spacing: 0.5px;
         }}
+
+        /* §May 14 daily probability bands feature — per-stock collapsible cone */
+        .daily-bands {{
+            margin-top: 10px; background: #1a1f2e;
+            border: 1px solid #2d3548; border-radius: 4px;
+            padding: 6px 10px;
+        }}
+        .daily-bands summary {{
+            cursor: pointer; color: #88a0c8;
+            font-size: 0.82em; font-weight: 600;
+            list-style: none;
+        }}
+        .daily-bands summary::-webkit-details-marker {{ display: none; }}
+        .daily-bands[open] summary {{ margin-bottom: 8px; }}
+        .db-preamble {{
+            padding: 6px 0; color: #c0c5d0;
+            font-size: 0.78em; line-height: 1.5;
+        }}
+        .db-preamble p {{ margin: 4px 0; }}
+        .db-preamble strong {{ color: #d4dae0; }}
+        .db-preamble em {{ color: #a8b0c0; }}
+        .db-table {{
+            width: 100%; border-collapse: collapse;
+            font-size: 0.76em; margin-top: 6px;
+        }}
+        .db-table th {{
+            background: #2d3548; padding: 4px 8px;
+            text-align: right; color: #88a0c8;
+            position: sticky; top: 0;
+        }}
+        .db-table th:first-child, .db-table th:nth-child(2) {{ text-align: left; }}
+        .db-table td {{
+            padding: 3px 8px; text-align: right; color: #c0c5d0;
+        }}
+        .db-table td:first-child, .db-table td:nth-child(2) {{ text-align: left; }}
+        .db-table tbody tr:nth-child(even) {{ background: #1f2532; }}
+        .db-scroll {{ max-height: 360px; overflow-y: auto; }}
 
         .run-btn {{
             display: inline-block; padding: 6px 18px; background: #4a9eff;

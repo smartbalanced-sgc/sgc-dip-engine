@@ -49,3 +49,7 @@ data/*.json
 test_output/
 *.tmp
 src/__pycache__/
+
+# Research artifacts (yfinance pull cache, generated reports)
+research/.cache/
+research/__pycache__/

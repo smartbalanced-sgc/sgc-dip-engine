@@ -437,18 +437,6 @@ def simulate_portfolio(portfolio_data, corr_matrix, ticker_order, regime_info, m
 
         stats = extract_statistics(paths, data['current_price'])
 
-        # TEMP: Wave 1 verification print — REMOVE before merge to main
-        if ticker == 'MU':
-            db = stats['daily_bands']
-            spread_d1 = db[0]['upper'] - db[0]['lower']
-            spread_d60 = db[-1]['upper'] - db[-1]['lower']
-            print(f"[WAVE1] MU current_price: ${data['current_price']:.2f}")
-            print(f"[WAVE1] MU daily_bands[0]: {db[0]}")
-            print(f"[WAVE1] MU daily_bands[-1]: {db[-1]}")
-            print(f"[WAVE1] MU spread Day 1: ${spread_d1:.2f}, Day 60: ${spread_d60:.2f}")
-            print(f"[WAVE1] MU len(daily_bands): {len(db)}")
-            print(f"[WAVE1] MU monotonic lower<upper: {all(d['lower'] < d['upper'] for d in db)}")
-
         results[ticker] = {
             'current_price': data['current_price'],
             'percentile_low': stats['percentile_low'],
