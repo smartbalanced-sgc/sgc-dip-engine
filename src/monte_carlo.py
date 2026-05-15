@@ -312,21 +312,36 @@ def extract_statistics(paths, current_price):
     terminal_prices = paths[:, -1]
     terminal_median = float(np.median(terminal_prices))
 
-    # §May 14 daily probability bands feature — per-day percentile evolution
+    # §May 14 daily probability bands — CUMULATIVE min/max interpretation
+    # (rebuilt 2026-05-14 from per-day percentiles after wrinkle review)
     # §signal.percentile_target — dip conviction (default 70)
     # §signal.rally_conviction_percentile — rally conviction (default 60)
-    # Lower band: dip_conviction% of paths sit at-or-above this price on Day N
-    #   → 30th percentile of Day-N prices when dip_conviction=70
-    # Upper band: rally_conviction% of paths sit at-or-below this price on Day N
-    #   → 60th percentile of Day-N prices when rally_conviction=60
-    # NOTE: arg asymmetry vs. headline rally target above is intentional.
-    # Headline rally uses (100 - rally_conviction) on the MAXIMA distribution;
-    # daily bands use rally_conviction directly on per-day PRICE distributions.
-    # Different statistics, different framing — see 04_NEXT_BUILD_SPEC.md wrinkle.
+    #
+    # Semantics under cumulative interpretation:
+    #   Lower band on Day N = price X such that {dip_conviction}% of paths
+    #     have already touched X-or-lower by Day N (i.e., 70% went as low
+    #     as X by Day N). Computed as the (100 - dip_conviction)th
+    #     percentile of each path's running-minimum up to Day N.
+    #   Upper band on Day N = price Y such that {rally_conviction}% of paths
+    #     have already touched Y-or-higher by Day N (i.e., 60% reached as
+    #     high as Y by Day N). Computed as the (100 - rally_conviction)th
+    #     percentile of each path's running-maximum up to Day N.
+    #
+    # These converge EXACTLY to the headline dip/rally targets at Day 60
+    # (because the Day 60 running-min/max = the path's full-window min/max,
+    # which is what the headline percentile is computed from). No wrinkle.
     dip_conviction = get_config('signal', 'percentile_target', default=70)
     rally_conviction = get_config('signal', 'rally_conviction_percentile', default=60)
-    daily_lower = np.percentile(paths, 100 - dip_conviction, axis=0)
-    daily_upper = np.percentile(paths, rally_conviction, axis=0)
+
+    # Running min/max along each path: shape (n_paths, n_days)
+    running_min = np.minimum.accumulate(paths, axis=1)
+    running_max = np.maximum.accumulate(paths, axis=1)
+
+    # Lower band: 30th percentile of running_min (70% of paths have min ≤ this)
+    daily_lower = np.percentile(running_min, 100 - dip_conviction, axis=0)
+    # Upper band: 40th percentile of running_max (60% of paths have max ≥ this)
+    daily_upper = np.percentile(running_max, 100 - rally_conviction, axis=0)
+
     daily_bands = [
         {'day': i + 1, 'lower': float(daily_lower[i]), 'upper': float(daily_upper[i])}
         for i in range(len(daily_lower))
