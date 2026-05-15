@@ -19,6 +19,10 @@ Usage:
     export FMP_API_KEY=xxx
     python3 tools/swing_analyzer_analytic.py SNDK \\
         --entry 1490 --shares 10 --target 1600 --stop 1181 --horizon 60
+
+    # Daily thesis health check (no-stop hold strategy):
+    python3 tools/swing_analyzer_analytic.py --check-thesis SNDK \\
+        --entry 1490 --shares 10 --target 1600 --horizon 60
 """
 import argparse
 import json
@@ -79,6 +83,31 @@ def fit_garch_11(returns):
         return omega + alpha * r.iloc[-1]**2 + beta * last_var
     except Exception:
         return r.tail(90).var()
+
+
+def compute_rsi_14(closes):
+    delta = closes.diff()
+    gain = delta.where(delta > 0, 0.0).rolling(14).mean()
+    loss = (-delta.where(delta < 0, 0.0)).rolling(14).mean()
+    rs = gain / loss.replace(0, np.nan)
+    rsi = 100 - 100 / (1 + rs)
+    return float(rsi.iloc[-1]) if not np.isnan(rsi.iloc[-1]) else 50.0
+
+
+def enrichment_drift(rsi, mom_5d):
+    rsi_drift = (50.0 - rsi) / 500.0
+    mom_drift = -mom_5d / 1000.0
+    return max(-0.10, min(0.10, rsi_drift + mom_drift))
+
+
+def run_mc_paths(S0, sigma_annual, mu_annual, horizon, n_paths=50_000, seed=42):
+    """Lightweight MC path generator for terminal-distribution analysis."""
+    np.random.seed(seed)
+    sd = sigma_annual / np.sqrt(252.0)
+    md = mu_annual / 252.0
+    z = np.random.standard_normal((n_paths, horizon))
+    log_rets = (md - 0.5 * sd**2) + sd * z
+    return S0 * np.exp(np.cumsum(log_rets, axis=1))
 
 
 def closed_touch_up(S0, U, T, mu, sigma):
@@ -330,6 +359,145 @@ def standalone_mode(args):
     print(f"Saved: {out_path}")
 
 
+def check_thesis_mode(args):
+    """
+    Daily thesis-health check for a no-stop hold strategy.
+
+    Computes P(touch target in horizon), the dynamic break-even threshold
+    (P at which holding equals cutting in EV), and a traffic-light verdict.
+    Appends today's reading to a CSV trend file for multi-day tracking.
+    """
+    api_key = os.environ.get("FMP_API_KEY")
+    if not api_key:
+        sys.exit("ERROR: FMP_API_KEY not set in environment")
+
+    df = fetch_history(args.thesis_ticker, api_key, args.lookback_days)
+    S0 = float(df["Close"].iloc[-1])
+    last_date = df["Date"].iloc[-1].strftime("%Y-%m-%d")
+    log_ret = np.log(df["Close"] / df["Close"].shift(1)).dropna()
+
+    forecast_var = fit_garch_11(log_ret)
+    sigma = float(np.sqrt(forecast_var * 252))
+    mu_hist = float(log_ret.mean() * 252)
+    mu_capped = max(-args.drift_cap, min(args.drift_cap, mu_hist))
+    rsi = compute_rsi_14(df["Close"])
+    mom_5d = float(df["Close"].iloc[-1] / df["Close"].iloc[-6] - 1.0) if len(df) >= 6 else 0.0
+    enr = enrichment_drift(rsi, mom_5d)
+    mu_effective = mu_capped + enr * 252 / args.horizon
+    T = args.horizon / 252
+
+    paths = run_mc_paths(S0, sigma, mu_effective, args.horizon, n_paths=50_000)
+    touched = (paths >= args.target).any(axis=1)
+    p_touch_mc = float(touched.mean())
+    untouched_terminals = paths[~touched, -1]
+    e_bad = float(untouched_terminals.mean()) if untouched_terminals.size > 0 else 0.0
+    p_touch_cf = closed_touch_up(S0, args.target, T, mu_effective, sigma)
+
+    pnl_good = (args.target - args.entry) * args.shares
+    pnl_bad = (e_bad - args.entry) * args.shares
+    cut_pnl = (S0 - args.entry) * args.shares
+    ev_hold = p_touch_mc * pnl_good + (1 - p_touch_mc) * pnl_bad
+    ev_advantage = ev_hold - cut_pnl
+
+    if pnl_good == pnl_bad:
+        breakeven_p = float("nan")
+    else:
+        breakeven_p = (cut_pnl - pnl_bad) / (pnl_good - pnl_bad)
+    cushion_pp = (p_touch_mc - breakeven_p) * 100
+
+    panic_level = args.panic_level
+    p_panic = closed_touch_down(S0, panic_level, T, mu_effective, sigma)
+
+    cushion = p_touch_mc - breakeven_p
+    if cushion >= 0.10:
+        verdict, light = "STRONG HOLD", "[GREEN]"
+    elif cushion >= 0.05:
+        verdict, light = "HOLD", "[YELLOW]"
+    elif cushion >= 0.0:
+        verdict, light = "EDGE", "[ORANGE]"
+    else:
+        verdict, light = "CUT", "[RED]"
+
+    print_header(f"{args.thesis_ticker} THESIS HEALTH CHECK — "
+                 f"{datetime.now():%Y-%m-%d %H:%M}")
+    print(f"  Data through:           {last_date} close")
+    print(f"  Spot (last close):      ${S0:.2f}")
+    print(f"  Sigma (GARCH):          {sigma * 100:.1f}%")
+    print(f"  Mu (effective):         {mu_effective * 100:+.1f}%  "
+          f"(raw {mu_hist * 100:+.1f}%, capped, enrichment-adjusted)")
+    print(f"  RSI(14):                {rsi:.1f}")
+    print(f"  5-day momentum:         {mom_5d * 100:+.2f}%")
+    print()
+    print(f"  Position: {args.shares} shares @ ${args.entry:.0f} cost basis, "
+          f"target ${args.target:.0f}, no automatic stop")
+    print(f"  Patience window:        {args.horizon} trading days")
+    print()
+    print_header("HEADLINE METRIC")
+    print(f"  P(touch ${args.target:.0f} within {args.horizon}d): "
+          f"{p_touch_mc * 100:5.1f}%  (MC, 50k paths)")
+    print(f"  P (closed-form cross-check):       "
+          f"{p_touch_cf * 100:5.1f}%  (continuous time)")
+    print()
+    print(f"  Break-even threshold P*:           "
+          f"{breakeven_p * 100:5.1f}%  (auto-computed from today's sigma/mu)")
+    print(f"  Cushion vs threshold:              "
+          f"{cushion_pp:+5.1f}pp")
+    print()
+    print_header("ECONOMICS")
+    print(f"  EV(hold no-stop {args.horizon}d):              ${ev_hold:+,.0f}")
+    print(f"  EV(cut now at spot ${S0:.2f}):    ${cut_pnl:+,.0f}")
+    print(f"  EV advantage of holding:           ${ev_advantage:+,.0f}")
+    print()
+    print(f"  If target hit:        +${pnl_good:,.0f}  (probability {p_touch_mc*100:.1f}%)")
+    print(f"  If target missed:     ${pnl_bad:+,.0f}  (avg, probability {(1-p_touch_mc)*100:.1f}%)")
+    print()
+    print_header("TAIL RISK")
+    print(f"  P(touch ${panic_level:.0f} panic floor in {args.horizon}d): "
+          f"{p_panic * 100:.1f}%")
+    print(f"  (your stated tolerance floor — watch this number trend up)")
+    print()
+    print_header(f"VERDICT  {light}  {verdict}")
+    bp = breakeven_p * 100
+    bands = [
+        (f">= {bp+10:.0f}%", "STRONG HOLD", "cushion >= 10pp, comfortable margin"),
+        (f"{bp+5:.0f}-{bp+10:.0f}%",  "HOLD",        "cushion 5-10pp, watch trend daily"),
+        (f"{bp:.0f}-{bp+5:.0f}%",  "EDGE",        "at break-even, cut on any deterioration"),
+        (f"< {bp:.0f}%",   "CUT",         "EV of hold worse than cut-now"),
+    ]
+    for band, status, note in bands:
+        marker = "  ->" if status == verdict else "    "
+        print(f"{marker}  P {band:<9} = {status:<13} ({note})")
+    print()
+
+    history_dir = Path(__file__).parent / "output"
+    history_dir.mkdir(exist_ok=True)
+    history_path = history_dir / f"thesis_history_{args.thesis_ticker}.csv"
+    new_row = (f"{datetime.now():%Y-%m-%d %H:%M},{S0:.2f},{sigma*100:.2f},"
+               f"{mu_effective*100:.2f},{p_touch_mc*100:.2f},"
+               f"{breakeven_p*100:.2f},{cushion_pp:.2f},{ev_hold:.0f},"
+               f"{cut_pnl:.0f},{verdict}\n")
+    if not history_path.exists():
+        history_path.write_text(
+            "timestamp,spot,sigma_pct,mu_pct,p_touch_pct,"
+            "breakeven_p_pct,cushion_pp,ev_hold,ev_cut,verdict\n")
+    with open(history_path, "a") as f:
+        f.write(new_row)
+
+    rows = history_path.read_text().strip().split("\n")
+    if len(rows) >= 2:
+        print_header(f"7-DAY TREND (from {history_path.name})")
+        print(f"  {'When':<19} {'Spot':>8} {'Sigma':>7} {'P(touch)':>9} "
+              f"{'P*':>7} {'Cushion':>9} {'Verdict':>14}")
+        print(f"  {'-'*19} {'-'*8} {'-'*7} {'-'*9} {'-'*7} {'-'*9} {'-'*14}")
+        for row in rows[1:][-7:]:
+            ts, sp, sg, mu_, pt, bp, cu, evh, evc, vd = row.split(",")
+            print(f"  {ts:<19} ${float(sp):>6.2f} {float(sg):>6.1f}% "
+                  f"{float(pt):>8.1f}% {float(bp):>6.1f}% {float(cu):>+8.1f}pp "
+                  f"{vd:>14}")
+        print()
+    print(f"  Saved: {history_path}")
+
+
 def main():
     ap = argparse.ArgumentParser(description=__doc__,
                                  formatter_class=argparse.RawDescriptionHelpFormatter)
@@ -343,10 +511,22 @@ def main():
     ap.add_argument("--drift-cap", type=float, default=1.0)
     ap.add_argument("--verify", metavar="MC_JSON_PATH",
                     help="Verify a swing_analyzer.py MC JSON output against PDE")
+    ap.add_argument("--check-thesis", metavar="TICKER", dest="thesis_ticker",
+                    help="Daily thesis health check for a no-stop hold "
+                         "(requires --entry --shares --target --horizon)")
+    ap.add_argument("--panic-level", type=float, default=1100,
+                    help="Tail-risk floor to track in --check-thesis mode")
     args = ap.parse_args()
 
     if args.verify:
         verify_mode(args.verify)
+        return
+
+    if args.thesis_ticker:
+        if not all([args.entry, args.shares, args.target]):
+            sys.exit("ERROR: --check-thesis requires "
+                     "--entry --shares --target [--horizon 60]")
+        check_thesis_mode(args)
         return
 
     if not all([args.ticker, args.entry, args.shares, args.target, args.stop]):
