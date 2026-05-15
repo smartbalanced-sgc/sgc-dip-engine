@@ -144,15 +144,21 @@ def main():
             
             # Run targeted AI on catalyst stocks only
             ai_results = run_ai_intelligence(portfolio_data, catalysts)
-            
+
             # Attach AI results to portfolio_data for Monte Carlo consumption
             for ticker, result in ai_results.items():
                 portfolio_data[ticker]['ai_result'] = result
         else:
             print("   ✅ No catalysts detected — AI skipped (£0 cost)")
-        
+
     except Exception as e:
         print(f"   ⚠️  AI intelligence skipped: {e}")
+
+    # §2026-05-14: capture total sentiment AI cost for dashboard surfacing
+    sentiment_ai_cost = sum(
+        (portfolio_data[t].get('ai_result', {}) or {}).get('cost', 0.0)
+        for t in portfolio_data
+    )
 
     # =========================================================
     # STEP 4: Build correlation matrix
@@ -192,12 +198,13 @@ def main():
     # Regime classification — runs BEFORE execution signals so it can modulate them
     # §regime_classifier.enabled — config-gated
     regime_results = {}
+    regime_ai_cost = 0.0
     if get_config('regime_classifier', 'enabled', default=False):
         print("\n🎯 Classifying per-stock trade regimes...")
         try:
             # Reuse the same Anthropic client pattern from sentiment.py
             ai_client = get_client() if get_config('regime_classifier', 'ai_research', 'enabled', default=False) else None
-            regime_results = classify_portfolio(portfolio_data, sector_perf, client=ai_client, unmodelable=unmodelable)
+            regime_results, regime_ai_cost = classify_portfolio(portfolio_data, sector_perf, client=ai_client, unmodelable=unmodelable)
             for ticker, result in regime_results.items():
                 regime = result.get('regime', 'NORMAL')
                 conf = result.get('confidence', 0)
@@ -260,14 +267,19 @@ def main():
             print(f"   ⚠️  Backtest failed: {e}")
 
     print("\n📈 STEP 7: Generating HTML dashboard...")
+    # §2026-05-14: surface total run AI cost on dashboard
+    total_run_ai_cost = sentiment_ai_cost + regime_ai_cost
+    if total_run_ai_cost > 0:
+        print(f"   💰 Total run AI cost: ${total_run_ai_cost:.4f}")
     html = generate_html(
         execution_data,
         macro_regime,
         macro_indicators['vix'],
         portfolio_data,
         warnings=all_warnings,
-        backtest_results=backtest_results,  # §Session 2: backtest on dashboard
-        regime_results=regime_results        # §May 13: regime tags on dashboard
+        backtest_results=backtest_results,
+        regime_results=regime_results,
+        run_ai_cost_usd=total_run_ai_cost,
     )
     save_html(html)
 

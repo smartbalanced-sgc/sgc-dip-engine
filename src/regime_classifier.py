@@ -499,7 +499,7 @@ def classify_portfolio(portfolio_data, sector_perf_data, client=None, unmodelabl
     Returns: dict {ticker: regime_result}
     """
     if not get_config('regime_classifier', 'enabled', default=False):
-        return {}
+        return {}, 0.0
 
     if unmodelable is None:
         unmodelable = set()
@@ -530,4 +530,4 @@ def classify_portfolio(portfolio_data, sector_perf_data, client=None, unmodelabl
     if cost_tracker['total'] > 0:
         print(f"   💰 Regime AI research cost: ${cost_tracker['total']:.4f}")
 
-    return results
+    return results, float(cost_tracker['total'])

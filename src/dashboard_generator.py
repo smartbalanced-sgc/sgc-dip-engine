@@ -98,7 +98,8 @@ def _bucket_tickers(by_ticker):
 
 
 def generate_html(execution_data, macro_regime, vix, portfolio_data,
-                  warnings=None, backtest_results=None, regime_results=None):
+                  warnings=None, backtest_results=None, regime_results=None,
+                  run_ai_cost_usd=None):
     if warnings is None:
         warnings = []
     if regime_results is None:
@@ -470,6 +471,21 @@ def generate_html(execution_data, macro_regime, vix, portfolio_data,
         </tr>
         """
 
+    # §2026-05-14: cost banner — shows actual AI spend for this run
+    if run_ai_cost_usd is not None and run_ai_cost_usd > 0:
+        annual_proj = run_ai_cost_usd * 252  # ~252 trading days/year
+        cost_banner_html = (
+            f'<div class="cost-banner">'
+            f'<span>This run cost approx. </span>'
+            f'<span class="cost-amount">${run_ai_cost_usd:.3f}</span>'
+            f'<span class="cost-detail">'
+            f'(Anthropic API; annualised projection at 1 run/day: ~${annual_proj:.0f}/yr)'
+            f'</span>'
+            f'</div>'
+        )
+    else:
+        cost_banner_html = ''
+
     html = f"""
 <!DOCTYPE html>
 <html lang="en">
@@ -697,10 +713,60 @@ def generate_html(execution_data, macro_regime, vix, portfolio_data,
         }}
         .run-btn:hover {{ background: #6bb3ff; }}
 
+        /* §2026-05-14: cost banner at top of dashboard */
+        .cost-banner {{
+            background: #1a1f2e; border: 1px solid #2d3548;
+            border-left: 3px solid #4a9eff;
+            padding: 8px 14px; margin-top: 10px; border-radius: 4px;
+            font-size: 0.85em; color: #c0c5d0;
+        }}
+        .cost-banner .cost-amount {{ color: #4a9eff; font-weight: 700; }}
+        .cost-banner .cost-detail {{ color: #88a0c8; margin-left: 8px; }}
+
         @media (max-width: 768px) {{
             .deployment-row {{ flex-direction: column; gap: 10px; }}
             .backtest-stats {{ flex-direction: column; gap: 10px; }}
             .bt-bucket {{ font-size: 0.8em; }}
+
+            /* §2026-05-14: mobile responsiveness for outer stock table */
+            table {{ display: block; }}
+            thead {{ display: none; }}
+            tbody {{ display: block; }}
+            tr {{
+                display: block;
+                margin-bottom: 14px;
+                border: 1px solid #2d3548;
+                border-radius: 6px;
+                padding: 10px;
+                background: #161b28;
+            }}
+            td {{
+                display: block;
+                width: 100%;
+                border: none;
+                padding: 4px 0;
+            }}
+            td.ticker {{
+                font-size: 1.1em; font-weight: 700;
+                border-bottom: 1px solid #2d3548;
+                padding-bottom: 6px; margin-bottom: 6px;
+            }}
+            td.earnings {{
+                color: #88a0c8; font-size: 0.85em;
+                border-top: 1px solid #2d3548;
+                padding-top: 6px; margin-top: 6px;
+            }}
+
+            /* §2026-05-14: daily bands table — horizontal scroll on mobile */
+            .db-scroll {{
+                overflow-x: auto;
+                -webkit-overflow-scrolling: touch;
+            }}
+            .db-table {{
+                font-size: 0.72em;
+                min-width: 380px;  /* prevent ultra-narrow columns */
+            }}
+            .db-table th, .db-table td {{ padding: 3px 5px; }}
         }}
     </style>
 </head>
@@ -718,6 +784,7 @@ def generate_html(execution_data, macro_regime, vix, portfolio_data,
             <div style="margin-top: 12px;">
                 <a href="https://github.com/smartbalanced-sgc/sgc-dip-engine/actions" target="_blank" class="run-btn">▶ Run Now</a>
             </div>
+            {cost_banner_html}
         </div>
 
         {warning_html}

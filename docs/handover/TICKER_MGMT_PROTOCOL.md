@@ -213,6 +213,69 @@ If this fails, **stop** and surface to Jesse. Do not commit.
 
 ---
 
+## 💰 Cost estimate (surface this in every response)
+
+After each successful add/remove, include a one-line cost estimate in the
+response. Format:
+
+> Portfolio now N tickers. Est cost per run: ~$X.XX. Annual at 1 run/day: ~$X.
+
+### How to compute the estimate
+
+The cost estimate is rough but useful. Formula:
+
+```
+N                = total tickers in config.yaml
+N_skipped        = count of plan-blocked tickers (.L, .GB suffixes) — usually 2-3
+N_vol_excluded   = expected vol-gate exclusions — typical 4-6 small caps
+N_modelable      = N - N_skipped - N_vol_excluded
+
+base_per_run         = 0.10   # regime AI baseline + buy prioritization
+per_modelable_stock  = 0.04   # average AI burn per modelable stock per run
+per_excluded_stock   = 0.005  # rule-based classification only; minimal AI
+
+est_cost_per_run  = base_per_run
+                  + N_modelable * per_modelable_stock
+                  + N_vol_excluded * per_excluded_stock
+
+est_annual = est_cost_per_run * 252  # trading days
+```
+
+### Example
+
+Portfolio: 41 tickers. 2 plan-blocked. 5 vol-excluded (typical). Modelable: 34.
+
+- est_cost_per_run = 0.10 + 34 × 0.04 + 5 × 0.005 = 0.10 + 1.36 + 0.025 = $1.49
+- est_annual = $375
+
+**Response format:**
+
+> Added X (Y). Portfolio now 41 tickers. Est cost per run: ~$1.49. Annual at
+> 1 run/day: ~$375.
+>
+> #End
+
+### Calibration over time
+
+The per-stock cost constants above are rough. After the real cost tracking
+data accumulates (~30+ runs), the dashboard's cost banner will show actual
+cost per run. Use that for calibration. If actual differs materially from
+estimate, refine the constants in this section.
+
+### When to flag cost concerns
+
+If `est_annual > $500` after a routine add, mention it as a soft warning:
+
+> Added X (Y). Portfolio now N tickers. Est cost per run: ~$2.50. Annual at
+> 1 run/day: ~$630. **Heads up: annual projection over $500 — consider
+> whether you want all current tickers or whether some should be removed.**
+>
+> #End
+
+This isn't a stop condition. Just visibility.
+
+---
+
 ## 💾 Commit and push
 
 ### Commit message format
