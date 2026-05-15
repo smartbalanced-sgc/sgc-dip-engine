@@ -41,34 +41,75 @@ def get_client():
 
 
 # =============================================================
+# COST TRACKING (Anthropic published pricing — Sonnet 4)
+# §2026-05-14 cost optimisation: replaces hardcoded estimates
+# =============================================================
+# Sonnet 4 token pricing: $3 / 1M input, $15 / 1M output
+# Web search tool: $10 / 1000 uses ($0.01 per use)
+# Source: anthropic.com/pricing
+
+INPUT_PRICE_PER_TOKEN = 3.00 / 1_000_000
+OUTPUT_PRICE_PER_TOKEN = 15.00 / 1_000_000
+WEB_SEARCH_PER_USE = 0.01
+
+
+def compute_call_cost(response, had_web_search=False):
+    """Compute actual USD cost from an Anthropic response object.
+    Falls back to a small estimate if usage fields are unavailable."""
+    try:
+        u = response.usage
+        cost = (u.input_tokens * INPUT_PRICE_PER_TOKEN
+                + u.output_tokens * OUTPUT_PRICE_PER_TOKEN)
+        # Server tool use (web search) — count actual invocations if reported
+        ws_uses = 0
+        stu = getattr(u, 'server_tool_use', None)
+        if stu is not None:
+            ws_uses = getattr(stu, 'web_search_requests', 0) or 0
+        if not ws_uses and had_web_search:
+            ws_uses = 1  # conservative fallback for single-call sites
+        cost += ws_uses * WEB_SEARCH_PER_USE
+        return float(cost)
+    except Exception:
+        return 0.05 if had_web_search else 0.005  # safe conservative fallback
+
+
+# =============================================================
 # CATALYST DETECTION (Layer 0 — Free, runs every day)
 # =============================================================
 
-def detect_catalysts(portfolio_data, previous_prices=None):
+def detect_catalysts(portfolio_data, previous_prices=None, unmodelable=None):
     """
     Scan all stocks for catalyst triggers. Returns dict of ticker → catalyst_info.
-    
+
     Trigger A: Post-earnings (0-24h after earnings)
-    Trigger B: Unusual move (residual Z-score > 2.5, beta-adjusted)
+    Trigger B: Unusual move (residual Z-score > 2.5, beta-adjusted; 3.0 for vol-excluded)
     Trigger C: Emergency (residual Z-score > 3.0, no FMP explanation)
     Trigger D: BUY prioritization (≥2 BUY signals same day)
-    
+
     Args:
         portfolio_data: dict of ticker → stock data (from data_fetcher)
         previous_prices: dict of ticker → yesterday's close (for move detection)
-    
+        unmodelable: set of tickers excluded by vol gate. For these, the
+            unusual_move Z-threshold is raised to 3.0 (their high baseline
+            volatility means lower thresholds produce noisy triggers).
+
     Returns: dict of ticker → {'trigger': str, 'details': dict}
     """
+    if unmodelable is None:
+        unmodelable = set()
     catalysts = {}
     today = datetime.now().date()
-    
+
     for ticker, data in portfolio_data.items():
         if data.get('_skip'):
             continue
-        
+
         current_price = data.get('current_price')
         if not current_price:
             continue
+        # §2026-05-14 cost optimisation: tighter Z-threshold for vol-excluded
+        # stocks whose normal-day moves can themselves register Z ~2-3.
+        unusual_z_threshold = 3.0 if ticker in unmodelable else 2.5
         
         earnings_date = data.get('earnings_date')
         hist = data.get('historical')
@@ -131,7 +172,7 @@ def detect_catalysts(portfolio_data, previous_prices=None):
                             }
                             continue
                     
-                    if adjusted_z > 2.5:
+                    if adjusted_z > unusual_z_threshold:
                         # Trigger B: Unusual move — structured data diagnosis
                         catalysts[ticker] = {
                             'trigger': 'unusual_move',
@@ -196,7 +237,7 @@ REASON: [max 80 chars citing specific data above]"""
         
         text = response.content[0].text
         result = _parse_ai_response(text, 'post_earnings')
-        result['cost'] = 0.002
+        result['cost'] = compute_call_cost(response, had_web_search=False)
         return result
         
     except Exception as e:
@@ -244,7 +285,7 @@ REASON: [max 80 chars]"""
         
         text = response.content[0].text
         result = _parse_ai_response(text, 'unusual_move')
-        result['cost'] = 0.002
+        result['cost'] = compute_call_cost(response, had_web_search=False)
         return result
         
     except Exception as e:
@@ -289,7 +330,7 @@ REASON: [max 100 chars citing specific news found]"""
         text = "\n".join(text_parts) if text_parts else ""
         
         result = _parse_ai_response(text, 'emergency')
-        result['cost'] = 0.08
+        result['cost'] = compute_call_cost(response, had_web_search=True)
         return result
         
     except Exception as e:
@@ -305,8 +346,11 @@ def prioritize_buy_signals(buy_tickers, portfolio_data, client):
     Returns: list of tickers in priority order + rationale dict
     Cost: ~£0.002 (single call regardless of count)
     """
-    if len(buy_tickers) < 2:
-        return buy_tickers, {t: 'Only BUY signal' for t in buy_tickers}, 0.0
+    # §2026-05-14 cost optimisation: raised gate from <2 to <3.
+    # Ranking only adds value when there are 3+ BUYs competing for capital;
+    # for 2 BUYs the dashboard side-by-side comparison is sufficient.
+    if len(buy_tickers) < 3:
+        return buy_tickers, {t: f'Only {len(buy_tickers)} BUY signal(s) — ranking skipped' for t in buy_tickers}, 0.0
     
     # Build structured summary for each BUY stock
     lines = []
@@ -370,7 +414,7 @@ RANK: TICKER - [max 60 chars reason citing data above]"""
                 ranked.append(t)
                 rationale[t] = 'Unranked'
         
-        return ranked, rationale, 0.002
+        return ranked, rationale, compute_call_cost(response, had_web_search=False)
         
     except Exception as e:
         print(f"   ⚠️  BUY prioritization failed: {e}")

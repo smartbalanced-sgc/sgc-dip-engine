@@ -321,8 +321,10 @@ SOURCES: [comma-separated source names]"""
         text_parts = [block.text for block in response.content if hasattr(block, 'text')]
         text = "\n".join(text_parts) if text_parts else ""
         
-        # Rough cost estimate: web search ~$0.05-0.10 per call
-        cost_tracker['total'] += 0.08
+        # §2026-05-14 cost optimisation: compute real cost from response.usage
+        # rather than hardcoded estimate. Sonnet 4 pricing + web search tool.
+        from sentiment import compute_call_cost
+        cost_tracker['total'] += compute_call_cost(response, had_web_search=True)
         
         # Parse structured response
         ai_result = _parse_ai_regime_response(text)
@@ -477,30 +479,45 @@ def build_sector_perf_map(macro_events_unused, sector_perf_data):
     return sector_returns
 
 
-def classify_portfolio(portfolio_data, sector_perf_data, client=None):
+def classify_portfolio(portfolio_data, sector_perf_data, client=None, unmodelable=None):
     """
     Run regime classification across the full portfolio.
-    
+
     Args:
         portfolio_data: dict {ticker: stock_data} from data_fetcher
         sector_perf_data: list/df from fetch_sector_performance
         client: Anthropic client (optional)
-    
+        unmodelable: set of tickers excluded by vol gate. For these, the
+            rule-based classification still runs (cheap, useful for dashboard
+            badges), but the AI disambiguation step is skipped — that step's
+            only purpose is to refine MOMENTUM/SQUEEZE_RISK labels which then
+            modulate BUY/WAIT signals, and vol-excluded stocks have no signal
+            to modulate. Skipping the AI step saves ~$0.20-0.40 per excluded
+            triggering stock without losing any decision-support value.
+            §2026-05-14 cost optimisation.
+
     Returns: dict {ticker: regime_result}
     """
     if not get_config('regime_classifier', 'enabled', default=False):
         return {}
-    
+
+    if unmodelable is None:
+        unmodelable = set()
+
     sector_perf_map = build_sector_perf_map(None, sector_perf_data)
     cost_tracker = {'total': 0.0}
-    
+
     results = {}
     for ticker, data in portfolio_data.items():
         if data is None or data.get('_skip'):
             continue
+        # §2026-05-14: pass client=None for vol-excluded stocks so AI step
+        # is short-circuited inside classify_trade_regime. Rule-based path
+        # still produces the regime label for the dashboard.
+        effective_client = None if ticker in unmodelable else client
         try:
             result = classify_trade_regime(ticker, data, sector_perf_map,
-                                           client=client, cost_tracker=cost_tracker)
+                                           client=effective_client, cost_tracker=cost_tracker)
             results[ticker] = result
         except Exception as e:
             print(f"   ⚠️  Regime classification failed for {ticker}: {e}")
@@ -509,8 +526,8 @@ def classify_portfolio(portfolio_data, sector_perf_data, client=None):
                 'reasoning': f'Classifier error: {str(e)[:60]}',
                 'metrics': {}
             }
-    
+
     if cost_tracker['total'] > 0:
-        print(f"   💰 Regime AI research cost: ${cost_tracker['total']:.2f}")
-    
+        print(f"   💰 Regime AI research cost: ${cost_tracker['total']:.4f}")
+
     return results

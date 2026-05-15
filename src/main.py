@@ -135,7 +135,7 @@ def main():
     modelable_data = {t: d for t, d in valid_stocks.items() if t not in unmodelable}
     try:
         # Detect which stocks have catalysts today
-        catalysts = detect_catalysts(portfolio_data)
+        catalysts = detect_catalysts(portfolio_data, unmodelable=unmodelable)
         
         if catalysts:
             trigger_summary = {t: c['trigger'] for t, c in catalysts.items()}
@@ -197,7 +197,7 @@ def main():
         try:
             # Reuse the same Anthropic client pattern from sentiment.py
             ai_client = get_client() if get_config('regime_classifier', 'ai_research', 'enabled', default=False) else None
-            regime_results = classify_portfolio(portfolio_data, sector_perf, client=ai_client)
+            regime_results = classify_portfolio(portfolio_data, sector_perf, client=ai_client, unmodelable=unmodelable)
             for ticker, result in regime_results.items():
                 regime = result.get('regime', 'NORMAL')
                 conf = result.get('confidence', 0)

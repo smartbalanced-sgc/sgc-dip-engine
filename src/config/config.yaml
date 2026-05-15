@@ -434,7 +434,7 @@ regime_classifier:
     # Trigger conditions — AI is called when ALL true:
     # 1. Regime is MOMENTUM or SQUEEZE_RISK (the ambiguous pair)
     # 2. Stock has not been researched in last N hours (caching)
-    cache_hours: 24
+    cache_hours: 48
     # Model & cost guardrails
     model: "claude-sonnet-4-20250514"
     max_tokens: 600
