@@ -50,6 +50,9 @@ test_output/
 *.tmp
 src/__pycache__/
 
+# Swing analyzer generated reports (tool prints + saves locally; not committed)
+tools/output/
+
 # Research artifacts (yfinance pull cache, auto-generated reports).
 # Dated snapshots of verdicts live in docs/research/ — those ARE tracked.
 research/.cache/
