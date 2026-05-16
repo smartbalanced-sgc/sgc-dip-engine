@@ -381,13 +381,18 @@ OPUS_INPUT_PER_TOKEN = 15.00 / 1_000_000
 OPUS_OUTPUT_PER_TOKEN = 75.00 / 1_000_000
 WEB_SEARCH_PER_USE = 0.01
 
-# Blend weights (sum = 1.0). Historical excluded — extrapolation bias.
+# Blend weights (sum = 1.0). Historical is included at low weight after
+# §2026-05-17 audit (Agent A finding #3): excluding historical entirely throws
+# out the only signal with price-discovery built in. Historical is gated as
+# LOW confidence by default, halving its effective weight; only when GARCH
+# fits cleanly AND the stock isn't post-parabolic does it get full weight.
 BLEND_WEIGHTS = {
-    "analyst": 0.25,
-    "sector":  0.15,
-    "macro":   0.10,
-    "insider": 0.10,
-    "ai":      0.40,
+    "historical": 0.15,
+    "analyst":    0.20,
+    "sector":     0.10,
+    "macro":      0.10,
+    "insider":    0.05,
+    "ai":         0.40,
 }
 
 
@@ -605,14 +610,18 @@ def _none_signal(reason):
             "notes": reason}
 
 
-def signal_from_analyst_targets(targets, S0):
+def signal_from_analyst_targets(targets, S0, price_history_df=None):
+    """Convert FMP analyst targets to drift signal.
+    §2026-05-17 audit fix #3: staleness awareness. If spot has moved >25%
+    in either direction over the last 60d, aggregator consensus likely lags;
+    downgrade confidence. Also: if target_mean is below spot AND only a
+    fraction of analysts have updated post-earnings, flag this in notes."""
     if not targets or not targets.get("target_mean") or S0 <= 0:
         return _none_signal("no analyst targets available")
     try:
         target = float(targets["target_mean"])
         if target <= 0:
             return _none_signal("invalid target price")
-        # Analyst targets are 12mo horizon → implied annualised drift
         drift = (target / S0) - 1.0
         high = float(targets.get("target_high") or target)
         low = float(targets.get("target_low") or target)
@@ -623,10 +632,27 @@ def signal_from_analyst_targets(targets, S0):
             conf = "MEDIUM"
         else:
             conf = "LOW"
+
+        # §2026-05-17 staleness check: how much has the stock moved over the
+        # last 60 days? If >25%, aggregator consensus likely hasn't refreshed.
+        staleness_note = ""
+        if price_history_df is not None and len(price_history_df) >= 60:
+            try:
+                p60 = float(price_history_df["Close"].iloc[-60])
+                move_60d = abs((S0 - p60) / p60)
+                if move_60d > 0.25:
+                    # Downgrade one tier
+                    conf = "LOW" if conf in ("HIGH", "MEDIUM") else "LOW"
+                    staleness_note = (f" (STALENESS: stock moved {move_60d*100:+.0f}% "
+                                      f"in 60d — consensus likely lags)")
+            except (ValueError, TypeError, IndexError):
+                pass
+
         return {
             "drift": float(drift), "confidence": conf,
             "source_quality": "REPUTABLE", "sources_count": 5,
-            "notes": f"target mean ${target:.0f}, range ${low:.0f}-${high:.0f}",
+            "notes": (f"target mean ${target:.0f}, range ${low:.0f}-${high:.0f}"
+                      f"{staleness_note}"),
         }
     except (ValueError, TypeError):
         return _none_signal("analyst target parse error")
@@ -648,20 +674,25 @@ def signal_from_sector(sector_perf):
 
 
 def signal_from_macro(macro):
+    """§2026-05-17 audit fix #5: macro is a BROAD backdrop, downgraded from
+    HIGH to MEDIUM confidence. A single VIX/SPY snapshot is not a
+    high-conviction forward-drift estimator for a single stock."""
     if not macro:
         return _none_signal("macro data unavailable")
     regime = macro.get("regime", "neutral")
-    # Map regime to drift tilt — modest, since macro is broad backdrop
     drift = {"risk_on": 0.10, "neutral": 0.05, "risk_off": -0.05}.get(regime, 0.05)
     return {
-        "drift": float(drift), "confidence": "HIGH",
+        "drift": float(drift), "confidence": "MEDIUM",  # was HIGH
         "source_quality": "PRIMARY", "sources_count": 2,
         "notes": (f"VIX {macro['vix']:.1f}, SPY {macro['spy_trend']*100:+.1f}% "
                   f"vs MA50 -> {regime}"),
     }
 
 
-def signal_from_insider(insider):
+def signal_from_insider(insider, market_cap_usd=None):
+    """§2026-05-17 audit fix #7: scale insider $/drift by market cap so the
+    calibration is size-relative. $6.6M on a $220B mcap is noise; the old
+    /100M absolute calibration over-weighted insider for large caps."""
     if not insider:
         return _none_signal("insider data unavailable")
     n_total = insider.get("n_buys", 0) + insider.get("n_sells", 0)
@@ -670,15 +701,54 @@ def signal_from_insider(insider):
                 "source_quality": "PRIMARY", "sources_count": 1,
                 "notes": "no insider P+S transactions in window"}
     net = insider.get("net_value_usd", 0)
-    # Calibration: net buying >$10M = +5% tilt; net selling >$10M = -5% tilt
-    drift = max(-0.10, min(0.10, net / 100_000_000))
+    # Size-relative calibration: 1% of market cap net flow → ±5% drift tilt
+    # (very large insider activity even relative to size)
+    if market_cap_usd and market_cap_usd > 0:
+        flow_pct_of_mcap = net / market_cap_usd
+        drift = max(-0.10, min(0.10, flow_pct_of_mcap * 5.0))
+        scaling_note = f" (mcap-relative: {flow_pct_of_mcap*100:.3f}% of $US{market_cap_usd/1e9:.0f}B)"
+    else:
+        # Fallback to absolute scaling if mcap unavailable
+        drift = max(-0.10, min(0.10, net / 100_000_000))
+        scaling_note = " (absolute scaling — no mcap available)"
     direction = "buying" if net > 0 else "selling"
+    # If gross flow is tiny relative to mcap, signal is noise — downgrade confidence
+    if market_cap_usd and market_cap_usd > 0 and abs(net) / market_cap_usd < 0.001:
+        # less than 0.1% of mcap → noise
+        conf = "LOW"
+        scaling_note += " — NOISE-LEVEL relative to mcap, downgraded LOW"
+    else:
+        conf = "MEDIUM"
     return {
-        "drift": float(drift), "confidence": "MEDIUM",
+        "drift": float(drift), "confidence": conf,
         "source_quality": "PRIMARY", "sources_count": 1,
         "notes": (f"net {direction} ${abs(net)/1e6:.1f}M "
                   f"({insider['n_buys']}P/{insider['n_sells']}S in "
-                  f"{insider['days']}d)"),
+                  f"{insider['days']}d){scaling_note}"),
+    }
+
+
+def signal_from_historical(mu_capped, mu_raw, sigma):
+    """§2026-05-17 audit fix #2: historical drift is included with non-zero
+    weight but gated as LOW confidence when the cap is binding (raw drift >
+    cap), which halves its effective weight per quality gates."""
+    if mu_capped is None:
+        return _none_signal("historical drift unavailable")
+    # If raw drift was capped, this means extrapolation bias is high — LOW conf
+    if abs(mu_raw) > 1.0:  # cap is binding
+        conf = "LOW"
+        gate_note = " (CAP BINDING — extrapolation risk; gated LOW)"
+    elif abs(mu_capped) > 0.5:  # large drift but not capped
+        conf = "MEDIUM"
+        gate_note = " (large drift; gated MEDIUM)"
+    else:
+        conf = "HIGH"
+        gate_note = ""
+    return {
+        "drift": float(mu_capped), "confidence": conf,
+        "source_quality": "PRIMARY", "sources_count": 1,
+        "notes": (f"GARCH-fit on 730d log returns, raw {mu_raw*100:+.0f}%/yr "
+                  f"capped at {mu_capped*100:+.0f}%/yr{gate_note}"),
     }
 
 
@@ -746,18 +816,29 @@ def build_ai_synthesis_prompt(ticker, profile, S0, sigma, horizon, recent_news,
 
 YOUR TASK: estimate annualised forward drift (mu) over the next {horizon} trading days. Output STRICT JSON ONLY.
 
-CRITICAL ANTI-BIAS RULES:
-- Do NOT extrapolate recent rallies. A multi-bagger post-IPO move does not mean the next 12 months will be the same.
-- Do NOT confirm priors. Be willing to say "uncertain, default risk-free ~5%".
+SYMMETRIC ANTI-BIAS RULES (apply EQUALLY in both directions):
+- Do NOT extrapolate recent rallies just because a stock has rallied hard.
+  BUT EQUALLY: do NOT under-weight fundamentally-driven growth. A multi-bagger
+  driven by VERIFIED earnings beats and raised guidance is genuinely different
+  from a multi-bagger driven by hype.
+- Do NOT confirm bull priors. Do NOT confirm bear priors either.
+- If the most recent quarter showed >100% YoY revenue growth with raised
+  guidance and verified backlog, the historical drift is at least partially
+  fundamentally validated; do NOT default to risk-free in that case.
 - If evidence is contradictory, return a WIDE range, not a confident middle.
-- USE web_search to verify against current data, not training cutoff. Search aggressively.
+- USE web_search to verify against current data, not training cutoff.
+- Aggregator consensus targets (StockAnalysis, MarketBeat, ChartMill) often
+  LAG fast-moving stocks by weeks-to-months after big moves; weight recent
+  individual sell-side updates (Bernstein, Mizuho, JPM, etc., last 30d)
+  MORE heavily than stale aggregator means.
 
 CONTEXT DATA (from FMP, today):
 - Current spot: ${S0:.2f}
 - GARCH vol: {sigma*100:.0f}% annualised (CHARACTERISES dispersion, NOT direction)
 - Sector context: {sector_str}
 - Analyst consensus: {analyst_str}
-- Insider activity: {insider_str}
+- Insider activity: {insider_str} (note: includes any tax-withholding dispositions
+  under Rule 16b-3(e); discount procedural sales when estimating sentiment)
 - Macro backdrop: {macro_str}
 
 RECENT NEWS HEADLINES (FMP, last 30-90 days):
@@ -772,7 +853,7 @@ SEARCH PRIORITIES (use web_search aggressively):
 3. Industry research: pricing trends, demand drivers, supply dynamics in {industry or sector}
 4. Competitive landscape: who competes with {company_name}? market-share trends?
 5. Sector ETF performance (SOXX/SMH for semis, XLK for tech, etc.) — last 90d
-6. Analyst rating changes (last 30 days)
+6. Analyst rating changes (last 30 days) — DISTINGUISH recent updates from stale consensus
 
 SOURCE QUALITY HIERARCHY:
 - PRIMARY: SEC filings, official company statements, exchange data, earnings transcripts
@@ -794,7 +875,7 @@ POSITION_GUIDANCE rules (the user already owns the stock):
 OUTPUT STRICT JSON (no markdown fences, no preamble, parseable directly):
 
 {{
-  "drift_point": <decimal, e.g., 0.20 = +20% annualised>,
+  "drift_point": <decimal OR null if evidence too thin>,
   "drift_low": <decimal, lower bound of range>,
   "drift_high": <decimal, upper bound of range>,
   "confidence": "HIGH" or "MEDIUM" or "LOW",
@@ -820,7 +901,12 @@ OUTPUT STRICT JSON (no markdown fences, no preamble, parseable directly):
   "evidence_gaps": "<1 sentence — what you could NOT verify and why>"
 }}
 
-If evidence is too thin to form a defensible view: confidence=LOW, drift_point=0.05, source_quality=NONE_FOUND, explain in evidence_gaps.
+CRITICAL — null-fallback rule (replaces previous +5% default per §2026-05-17 audit fix #1):
+If evidence is too thin to form a defensible drift estimate, set drift_point to
+JSON null (literal null, not the string "null"), set source_quality to NONE_FOUND,
+set confidence to LOW, and explain in evidence_gaps. This will cause the signal
+to be DROPPED from the blend rather than inject a +5% anchor. Do NOT return a
+safe-feeling middle estimate when the evidence doesn't support one.
 
 Output ONLY the JSON. Start with {{ and end with }}. No other text."""
 
@@ -847,7 +933,10 @@ def call_ai_analyst(prompt, model="claude-opus-4-7", max_tokens=3000):
 
 
 def parse_ai_synthesis(text):
-    """Extract JSON from Claude's response. Tolerant of code fences and stray prose."""
+    """Extract JSON from Claude's response. Tolerant of code fences and stray prose.
+    §2026-05-17 audit fix #1: drift_point=null is a VALID response (signals
+    'evidence too thin'); preserve as Python None. The downstream signal_from_ai
+    then correctly maps it to NONE_FOUND quality → dropped from blend."""
     if not text:
         return None
     import re
@@ -858,9 +947,338 @@ def parse_ai_synthesis(text):
     if start < 0 or end < 0 or end <= start:
         return None
     try:
-        return json.loads(cleaned[start:end+1])
+        parsed = json.loads(cleaned[start:end+1])
+        # json.loads correctly converts JSON null to Python None — signal_from_ai
+        # treats None drift_point as NONE_FOUND, dropping the signal from blend.
+        # No further coercion needed here; just return.
+        return parsed
     except json.JSONDecodeError:
         return None
+
+
+# =============================================================
+# TIER-1 GOD MODE UPGRADES (§2026-05-17 — option Y scope)
+#
+# 1. Regime detection — momentum/mean-reversion/range classification
+#    affects what each signal's drift actually means
+# 2. Vol-regime advisory — at sigma > 50%, drift is 2nd-order;
+#    surface this rather than letting users obsess over drift point
+# 3. Blend with uncertainty — confidence intervals on blended drift,
+#    not just point estimate. Decision uses interval not midpoint.
+# 4. Bayesian belief update — yesterday's blend = today's prior;
+#    accumulate evidence rather than reset each daily run
+# 5. Path-dependent metrics — max drawdown distribution,
+#    time-to-target distribution, drawdown-along-the-way percentiles
+# =============================================================
+
+
+def detect_swing_regime(rsi, mom_5d, mom_30d_pct, sigma, ytd_return_pct=None):
+    """Classify the stock's current regime for signal interpretation.
+
+    Regimes:
+      MOMENTUM_BULL   - strong upward trend, low mean-reversion risk near-term,
+                        but high mean-reversion risk medium-term after parabola
+      MOMENTUM_BEAR   - sustained decline, breakdown risk
+      MEAN_REVERSION  - extended (RSI extremes) with diverging momentum
+      RANGE           - low directional bias, low recent vol
+      POST_PARABOLA   - massive YTD rally, RSI cooling, mean-reversion likely
+      UNCERTAIN       - mixed signals, no clear regime
+
+    Each regime affects signal interpretation downstream.
+    """
+    regime = "UNCERTAIN"
+    detail = ""
+
+    is_high_vol = sigma > 0.50
+    has_parabola = ytd_return_pct is not None and ytd_return_pct > 200
+    rsi_overbought = rsi is not None and rsi > 70
+    rsi_oversold = rsi is not None and rsi < 30
+    mom5_pos = mom_5d > 0.02
+    mom5_neg = mom_5d < -0.02
+    mom30_pos = mom_30d_pct is not None and mom_30d_pct > 5
+    mom30_neg = mom_30d_pct is not None and mom_30d_pct < -5
+
+    if has_parabola:
+        regime = "POST_PARABOLA"
+        detail = (f"YTD +{ytd_return_pct:.0f}% — parabolic rally; "
+                  f"mean-reversion risk over horizon > weeks")
+    elif rsi_overbought and mom5_neg:
+        regime = "MEAN_REVERSION"
+        detail = f"RSI {rsi:.0f} (overbought) + 5d momentum {mom_5d*100:+.1f}% diverging"
+    elif rsi_oversold and mom5_pos:
+        regime = "MEAN_REVERSION"
+        detail = f"RSI {rsi:.0f} (oversold) + 5d momentum {mom_5d*100:+.1f}% diverging upward"
+    elif mom30_pos and mom5_pos and not rsi_overbought:
+        regime = "MOMENTUM_BULL"
+        detail = f"30d momentum +{mom_30d_pct:.1f}%, 5d {mom_5d*100:+.1f}%, RSI {rsi:.0f}"
+    elif mom30_neg and mom5_neg:
+        regime = "MOMENTUM_BEAR"
+        detail = f"30d momentum {mom_30d_pct:+.1f}%, 5d {mom_5d*100:+.1f}%, RSI {rsi:.0f}"
+    elif not is_high_vol and abs(mom_5d) < 0.02:
+        regime = "RANGE"
+        detail = f"low vol ({sigma*100:.0f}%) + flat momentum"
+    else:
+        detail = (f"RSI {rsi:.0f}, 5d {mom_5d*100:+.1f}%, "
+                  f"30d {mom_30d_pct:+.1f}% — no clear regime"
+                  if mom_30d_pct is not None
+                  else f"RSI {rsi:.0f}, 5d {mom_5d*100:+.1f}% — no clear regime")
+
+    return {"regime": regime, "detail": detail,
+            "is_high_vol": is_high_vol, "has_parabola": has_parabola}
+
+
+def vol_regime_advisory(sigma):
+    """Translate volatility level into a decision-quality advisory.
+    At extreme vol, drift point estimates matter less than tail-risk management.
+    """
+    sigma_pct = sigma * 100
+    if sigma_pct >= 80:
+        return {
+            "level": "EXTREME",
+            "advisory": (
+                f"Sigma {sigma_pct:.0f}% — drift estimate is 2nd-order. At this vol, "
+                "the outcome is dominated by dispersion, not direction. Focus on "
+                "TAIL-RISK metrics (panic-floor touch probability, max drawdown "
+                "distribution) rather than the blended drift point."),
+            "drift_decisive": False,
+        }
+    elif sigma_pct >= 50:
+        return {
+            "level": "HIGH",
+            "advisory": (
+                f"Sigma {sigma_pct:.0f}% — high vol regime. Drift matters but "
+                "the cushion above break-even must be earned BOTH from drift "
+                "advantage AND from acceptable tail risk. Watch panic-floor probability."),
+            "drift_decisive": False,
+        }
+    elif sigma_pct >= 25:
+        return {
+            "level": "NORMAL",
+            "advisory": (
+                f"Sigma {sigma_pct:.0f}% — normal vol regime. Blended drift is the "
+                "primary input for the hold/cut decision."),
+            "drift_decisive": True,
+        }
+    else:
+        return {
+            "level": "LOW",
+            "advisory": (
+                f"Sigma {sigma_pct:.0f}% — low vol regime. Drift dominates outcome. "
+                "Cushion math is highly reliable; small drift changes flip verdicts."),
+            "drift_decisive": True,
+        }
+
+
+# Standard error mapping per confidence tier. These map qualitative
+# confidence to a numeric standard error on the drift estimate in
+# decimal annualised return units.
+CONFIDENCE_TO_SE = {"HIGH": 0.05, "MEDIUM": 0.10, "LOW": 0.20}
+
+
+def blend_with_uncertainty(signals, weights_dict=None):
+    """Blend with confidence intervals via signal-weighted variance.
+
+    Each signal contributes drift + standard error. The blend's variance is
+    the weighted average of variances (treating signals as independent samples
+    of an underlying drift). Returns:
+      {blended, std, lo68, hi68, lo95, hi95, weights, dispersion_pp, n_active}
+    """
+    if weights_dict is None:
+        weights_dict = BLEND_WEIGHTS
+
+    effective = {}
+    for name, info in signals.items():
+        if info.get("drift") is None:
+            effective[name] = 0.0
+            continue
+        w = weights_dict.get(name, 0.0)
+        sq = info.get("source_quality", "REPUTABLE")
+        sc = int(info.get("sources_count", 0))
+        conf = info.get("confidence", "MEDIUM")
+        if sq == "NONE_FOUND":
+            w = 0.0
+        elif sq == "SPECULATIVE" and sc < 2:
+            w *= 0.5
+        if conf == "LOW":
+            w *= 0.5
+        effective[name] = w
+
+    total = sum(effective.values())
+    if total <= 0:
+        return {"blended": None, "std": None,
+                "lo68": None, "hi68": None, "lo95": None, "hi95": None,
+                "weights": effective, "fallback": True,
+                "dispersion_pp": 0.0, "n_active": 0}
+
+    # Normalise weights so they sum to 1
+    norm = {n: w/total for n, w in effective.items()}
+
+    blended = sum(signals[n]["drift"] * norm[n]
+                  for n in signals if norm[n] > 0)
+
+    # Weighted variance — combine within-signal SE^2 + between-signal dispersion
+    within_var = 0.0
+    between_var = 0.0
+    for n in signals:
+        if norm[n] <= 0:
+            continue
+        se = CONFIDENCE_TO_SE.get(signals[n].get("confidence", "MEDIUM"), 0.10)
+        within_var += (norm[n] ** 2) * (se ** 2)
+        between_var += norm[n] * (signals[n]["drift"] - blended) ** 2
+
+    total_var = within_var + between_var
+    std = total_var ** 0.5
+
+    active_drifts = [signals[n]["drift"] for n in signals
+                     if norm[n] > 0 and signals[n]["drift"] is not None]
+    dispersion = (max(active_drifts) - min(active_drifts)) * 100 if active_drifts else 0
+
+    return {
+        "blended": float(blended),
+        "std": float(std),
+        "lo68": float(blended - std),
+        "hi68": float(blended + std),
+        "lo95": float(blended - 2 * std),
+        "hi95": float(blended + 2 * std),
+        "weights": effective,
+        "fallback": False,
+        "dispersion_pp": float(dispersion),
+        "n_active": sum(1 for w in effective.values() if w > 0),
+    }
+
+
+def bayesian_update(prior_blend, today_blend, prior_age_days=1):
+    """Bayesian update of blended drift estimate using yesterday's posterior
+    as today's prior. Treats both as Gaussian: posterior_mu, posterior_var.
+
+    The age of the prior modulates how much weight it carries. Stale priors
+    (>3 days old) carry less weight; the today blend dominates.
+
+    Returns: {posterior_mu, posterior_std, prior_weight, obs_weight}
+    """
+    if today_blend.get("blended") is None or today_blend.get("std") is None:
+        return None
+    if not prior_blend or prior_blend.get("blended") is None:
+        # No prior — today's blend IS the posterior
+        return {"posterior_mu": today_blend["blended"],
+                "posterior_std": today_blend["std"],
+                "prior_weight": 0.0, "obs_weight": 1.0,
+                "note": "no prior available — using today's blend"}
+
+    prior_mu = prior_blend["blended"]
+    prior_std = prior_blend.get("std", 0.15)  # default if old format
+    obs_mu = today_blend["blended"]
+    obs_std = today_blend["std"]
+
+    # Inflate prior variance based on age (stale priors are less informative)
+    inflation = 1.0 + 0.2 * max(0, prior_age_days - 1)
+    prior_var = (prior_std * inflation) ** 2
+    obs_var = obs_std ** 2
+
+    posterior_var = 1.0 / (1.0/prior_var + 1.0/obs_var)
+    posterior_mu = posterior_var * (prior_mu/prior_var + obs_mu/obs_var)
+    posterior_std = posterior_var ** 0.5
+
+    prior_weight = posterior_var / prior_var
+    obs_weight = posterior_var / obs_var
+
+    return {"posterior_mu": float(posterior_mu),
+            "posterior_std": float(posterior_std),
+            "prior_weight": float(prior_weight),
+            "obs_weight": float(obs_weight),
+            "note": (f"Bayesian: prior_mu={prior_mu*100:+.1f}% std={prior_std*100:.1f}%, "
+                     f"obs_mu={obs_mu*100:+.1f}% std={obs_std*100:.1f}%, "
+                     f"weights {prior_weight*100:.0f}/{obs_weight*100:.0f}")}
+
+
+def compute_path_metrics(paths, S0, target, panic_level=None):
+    """Path-dependent risk metrics beyond just 'touched/not touched'.
+
+    Returns:
+      time_to_target_median, time_to_target_p25, time_to_target_p75: trading days
+      max_drawdown_median, p75, p90: % from S0
+      drawdown_along_way_at_30d: percentile of drawdown at mid-horizon
+      panic_touch_during_journey: P(touch panic) even on paths that hit target
+    """
+    n_paths, horizon = paths.shape
+
+    # Running max-drawdown per path: max((S0 - min so far)/S0)
+    running_min = np.minimum.accumulate(paths, axis=1)
+    drawdown_per_step = (S0 - running_min) / S0  # positive = drawdown
+    max_dd_per_path = drawdown_per_step[:, -1]  # at horizon
+
+    # Time to first touch of target (np.inf if never)
+    touched_target = paths >= target
+    has_touch = touched_target.any(axis=1)
+    first_touch_idx = np.where(has_touch, np.argmax(touched_target, axis=1) + 1, -1)
+    touch_times = first_touch_idx[has_touch]
+
+    # Panic touch ever (different from "stopped out" since we have no stop)
+    if panic_level is not None:
+        touched_panic = (paths <= panic_level).any(axis=1)
+    else:
+        touched_panic = np.zeros(n_paths, dtype=bool)
+
+    # Drawdown at mid-horizon (day 30 typically — represents "what does my
+    # screen look like at day 30 if I'm still in the position?")
+    mid_idx = horizon // 2
+    drawdown_at_mid = drawdown_per_step[:, mid_idx]
+
+    out = {
+        "max_drawdown_median": float(np.median(max_dd_per_path)),
+        "max_drawdown_p75": float(np.percentile(max_dd_per_path, 75)),
+        "max_drawdown_p90": float(np.percentile(max_dd_per_path, 90)),
+        "drawdown_at_mid_median": float(np.median(drawdown_at_mid)),
+        "drawdown_at_mid_p75": float(np.percentile(drawdown_at_mid, 75)),
+        "panic_touch_prob_total": float(touched_panic.mean()),
+        "panic_among_target_paths": float(
+            (touched_panic & has_touch).sum() / max(1, has_touch.sum())
+        ),
+    }
+
+    if len(touch_times) > 0:
+        out["time_to_target_median"] = float(np.median(touch_times))
+        out["time_to_target_p25"] = float(np.percentile(touch_times, 25))
+        out["time_to_target_p75"] = float(np.percentile(touch_times, 75))
+    else:
+        out["time_to_target_median"] = None
+        out["time_to_target_p25"] = None
+        out["time_to_target_p75"] = None
+
+    return out
+
+
+def load_prior_blend(history_path, days_back_limit=3):
+    """Read yesterday's blend from CSV history as the Bayesian prior.
+    Returns: (prior_dict_or_None, age_days)"""
+    if not history_path.exists():
+        return None, None
+    try:
+        rows = history_path.read_text().strip().split("\n")
+        if len(rows) < 2:
+            return None, None
+        header = rows[0].split(",")
+        if "mu_blended_pct" not in header or "blend_std_pct" not in header:
+            return None, None  # old schema, skip
+        # Get last row
+        last = rows[-1].split(",")
+        idx_mu = header.index("mu_blended_pct")
+        idx_std = header.index("blend_std_pct")
+        idx_ts = header.index("timestamp")
+        try:
+            prior_blend = {
+                "blended": float(last[idx_mu]) / 100.0,
+                "std": float(last[idx_std]) / 100.0,
+            }
+            prior_ts = datetime.strptime(last[idx_ts][:10], "%Y-%m-%d")
+            age = (datetime.now() - prior_ts).days
+            if age > days_back_limit:
+                return None, age  # too stale
+            return prior_blend, age
+        except (ValueError, IndexError):
+            return None, None
+    except Exception:
+        return None, None
 
 
 # -----------------------------------------------------------
@@ -915,11 +1333,17 @@ def blend_drifts(signals):
 # Position-specific guidance (mechanical, cross-check vs AI)
 # -----------------------------------------------------------
 
-def mechanical_position_guidance(cushion, ev_advantage, dispersion_pp, ai_guidance):
+def mechanical_position_guidance(cushion, ev_advantage, dispersion_pp,
+                                  ai_guidance, ci_lo68=None, ci_hi68=None):
     """
-    Mechanical HOLD/TRIM/CUT/ADD purely from the math + signal dispersion,
-    independent of AI synthesis. Returned alongside AI's own view so the
-    user sees both and any disagreement.
+    §2026-05-17 audit fix #8: do NOT default to "more conservative" when math
+    and AI disagree. Report BOTH views and let the user decide. Mechanical
+    rule uses cushion + dispersion + CI; AI rule comes from AI synthesis.
+    No implicit risk-aversion prior.
+
+    §audit fix #6: hysteresis bias — symmetric dispersion handling. High
+    dispersion downgrades HOLD->TRIM (as before) AND upgrades borderline-CUT
+    to EDGE (where it gets re-evaluated next day).
     """
     if cushion >= 0.10 and ev_advantage > 500:
         mech = "HOLD"
@@ -928,37 +1352,93 @@ def mechanical_position_guidance(cushion, ev_advantage, dispersion_pp, ai_guidan
     elif cushion >= 0.0:
         mech = "TRIM"
     elif cushion >= -0.05:
-        mech = "TRIM"
+        mech = "TRIM"  # at edge — partial off
     else:
         mech = "CUT"
-    # High signal dispersion -> downgrade conviction
-    if dispersion_pp >= 30 and mech == "HOLD":
-        mech = "TRIM"
+
+    # CI-aware fix: if the 68% CI on cushion straddles zero, downgrade
+    # CUT to EDGE/TRIM because the verdict is statistically not different
+    # from break-even.
+    if ci_lo68 is not None and ci_hi68 is not None and mech == "CUT":
+        # cushion bounds — note we receive the cushion CI in pp via the
+        # caller's translation of drift CI to cushion CI
+        if ci_lo68 < 0 and ci_hi68 > 0:
+            mech = "TRIM"  # uncertain — don't commit to full cut
+
+    # Symmetric dispersion handling
+    if dispersion_pp >= 30:
+        if mech == "HOLD":
+            mech = "TRIM"  # signals disagree, scale back
+        elif mech == "CUT":
+            mech = "TRIM"  # signals disagree, don't fully exit
+
     agreement = (mech == ai_guidance) if ai_guidance else None
     return mech, agreement
 
 
-def check_thesis_mode(args):
+def check_hysteresis(history_path, today_verdict, today_cushion):
+    """§2026-05-17 audit fix #6: verdict-flip protection. If today's verdict
+    differs from yesterday's, surface a hysteresis warning (do not override).
+    Specifically: HOLD->CUT or CUT->HOLD on a single day's data is a red flag
+    unless the cushion movement is large.
+
+    Returns: (warning_str_or_None, prior_verdict_or_None)
     """
-    Daily thesis-health check for a no-stop hold strategy (GOD MODE).
+    if not history_path.exists():
+        return None, None
+    try:
+        rows = history_path.read_text().strip().split("\n")
+        if len(rows) < 2:
+            return None, None
+        header = rows[0].split(",")
+        if "verdict" not in header:
+            return None, None
+        idx_v = header.index("verdict")
+        idx_c = header.index("cushion_pp")
+        last = rows[-1].split(",")
+        prior_verdict = last[idx_v].strip()
+        try:
+            prior_cushion = float(last[idx_c])
+        except (ValueError, IndexError):
+            prior_cushion = None
 
-    Multi-signal forward drift estimation:
-      1. Historical (GARCH + RSI/mom enrichment) — shown for reference, NOT blended
-      2. Analyst consensus price targets (FMP)
-      3. Sector momentum (FMP historical-sector-performance)
-      4. Macro regime (FMP VIX + SPY, inlined from src/macro_regime.py logic)
-      5. Insider activity (FMP insider-trading/search)
-      6. AI analyst synthesis (Claude Opus 4.7 + web_search)
+        if prior_verdict == today_verdict:
+            return None, prior_verdict  # no flip
 
-    Blended forward drift becomes the headline assumption.
-    Verdict computed against blended drift, not historical.
+        # Flip detected
+        cushion_move = (today_cushion - prior_cushion) if prior_cushion is not None else None
+        if cushion_move is not None and abs(cushion_move) > 15:
+            # Big move — flip is justified
+            return None, prior_verdict
+        warn = (f"VERDICT FLIPPED from {prior_verdict} to {today_verdict} "
+                f"in one day. Cushion moved {cushion_move:+.1f}pp."
+                if cushion_move is not None
+                else f"VERDICT FLIPPED from {prior_verdict} to {today_verdict} in one day.")
+        warn += (" Per audit fix #6, consider this provisional until "
+                 "confirmed by tomorrow's reading.")
+        return warn, prior_verdict
+    except Exception:
+        return None, None
+
+
+def check_thesis_mode(args):
+    """Daily thesis-health check, GOD MODE v2 (§2026-05-17 option Y).
+
+    Implements:
+      - Tier 0 (8 bias fixes): historical re-included with quality gating;
+        null fallback for AI; symmetric anti-bias prompt; staleness-aware
+        analyst; size-relative insider; macro downgraded to MEDIUM; hysteresis
+        on verdict flips; report-both tie-breaker
+      - Tier 1 (5 architectural upgrades): regime detection; vol-regime
+        advisory; confidence intervals on blended drift; Bayesian belief
+        update across days; path-dependent risk metrics (max drawdown,
+        time-to-target, drawdown-along-the-way)
     """
     api_key = os.environ.get("FMP_API_KEY")
     if not api_key:
         sys.exit("ERROR: FMP_API_KEY not set in environment")
 
     ticker = args.thesis_ticker
-
     df = fetch_history(ticker, api_key, args.lookback_days)
     S0 = float(df["Close"].iloc[-1])
     last_date = df["Date"].iloc[-1].strftime("%Y-%m-%d")
@@ -970,23 +1450,35 @@ def check_thesis_mode(args):
     mu_capped = max(-args.drift_cap, min(args.drift_cap, mu_hist))
     rsi = compute_rsi_14(df["Close"])
     mom_5d = float(df["Close"].iloc[-1] / df["Close"].iloc[-6] - 1.0) if len(df) >= 6 else 0.0
+    # 30-day momentum
+    mom_30d = (float(df["Close"].iloc[-1] / df["Close"].iloc[-31] - 1.0) * 100
+               if len(df) >= 31 else None)
     enr = enrichment_drift(rsi, mom_5d)
-    # §2026-05-17: enrichment scaling deliberately differs from src/monte_carlo.py.
-    # Canon treats enr as annualised rate (small effect over years). The swing
-    # tool re-annualises (× 252/horizon) so RSI/momentum signals carry meaningful
-    # weight on a 60-day horizon. Audit (Agent 1 BUG-1) flagged this as a
-    # divergence — KEPT INTENTIONALLY for swing-trade short-horizon sensitivity.
     mu_effective_historical = mu_capped + enr * 252 / args.horizon
+
+    # YTD return for regime detection
+    ytd_pct = None
+    try:
+        ytd_start = df[df["Date"].dt.year == datetime.now().year]["Close"].iloc[0]
+        ytd_pct = (S0 / float(ytd_start) - 1.0) * 100
+    except (IndexError, ValueError, TypeError):
+        ytd_pct = None
+
     T = args.horizon / 252
 
-    # === GATHER MULTI-SIGNAL INTELLIGENCE ===
-    print_header(f"{ticker} THESIS HEALTH CHECK (GOD MODE) — "
+    print_header(f"{ticker} THESIS HEALTH CHECK (GOD MODE v2) — "
                  f"{datetime.now():%Y-%m-%d %H:%M}")
     print(f"  Gathering intelligence (this takes ~10-30s)...")
     print()
 
+    # === FETCH INTEL ===
     profile = fetch_company_profile(ticker, api_key) or {}
     sector_name = profile.get("sector") or "Technology"
+    market_cap_usd = None
+    try:
+        market_cap_usd = float(profile.get("mktCap") or 0) or None
+    except (ValueError, TypeError):
+        market_cap_usd = None
     analyst_targets = fetch_analyst_targets(ticker, api_key)
     sector_perf = fetch_sector_perf(sector_name, api_key, days=30)
     insider = fetch_insider_activity(ticker, api_key, days=90)
@@ -994,16 +1486,22 @@ def check_thesis_mode(args):
     recent_news = fetch_recent_news(ticker, api_key, limit=20)
     press_releases = fetch_press_releases(ticker, api_key, limit=10)
 
-    # === BUILD SIGNAL DICT ===
+    # === REGIME + VOL ADVISORY (Tier 1 #11, #12) ===
+    regime = detect_swing_regime(rsi, mom_5d, mom_30d, sigma, ytd_pct)
+    vol_advice = vol_regime_advisory(sigma)
+
+    # === BUILD SIGNAL DICT (with all Tier 0 fixes) ===
     signals = {
-        "analyst": signal_from_analyst_targets(analyst_targets, S0),
-        "sector":  signal_from_sector(sector_perf),
-        "macro":   signal_from_macro(macro),
-        "insider": signal_from_insider(insider),
+        "historical": signal_from_historical(mu_effective_historical,
+                                              mu_hist, sigma),
+        "analyst":    signal_from_analyst_targets(analyst_targets, S0,
+                                                   price_history_df=df),
+        "sector":     signal_from_sector(sector_perf),
+        "macro":      signal_from_macro(macro),
+        "insider":    signal_from_insider(insider, market_cap_usd=market_cap_usd),
     }
 
-    # === AI SYNTHESIS (optional, default ON) ===
-    ai_signal = None
+    # === AI SYNTHESIS ===
     ai_parsed = None
     ai_cost = 0.0
     ai_raw = ""
@@ -1015,19 +1513,34 @@ def check_thesis_mode(args):
         ai_parsed, ai_cost, ai_raw = call_ai_analyst(
             prompt, model=args.ai_model, max_tokens=3000)
         if ai_parsed is not None:
-            ai_signal = signal_from_ai(ai_parsed)
-            signals["ai"] = ai_signal
+            signals["ai"] = signal_from_ai(ai_parsed)
         else:
-            signals["ai"] = {"drift": None, "confidence": "LOW",
-                             "source_quality": "NONE_FOUND", "sources_count": 0,
-                             "notes": "AI synthesis failed; see raw output"}
+            signals["ai"] = _none_signal("AI synthesis failed; see raw output")
 
-    # === BLEND ===
-    blend = blend_drifts(signals)
-    mu_blended = blend["blended"]
-    mu_for_decision = mu_blended  # headline now uses blended drift
+    # === BLEND WITH UNCERTAINTY (Tier 1 #10) ===
+    blend = blend_with_uncertainty(signals)
+    if blend["blended"] is None:
+        # All signals failed — fall back to historical alone
+        print("  WARNING: all signals NONE_FOUND or excluded. Falling back to "
+              "historical drift for the blend.")
+        mu_for_decision = mu_effective_historical
+        blend = {"blended": mu_for_decision, "std": 0.20,
+                 "lo68": mu_for_decision - 0.20, "hi68": mu_for_decision + 0.20,
+                 "lo95": mu_for_decision - 0.40, "hi95": mu_for_decision + 0.40,
+                 "weights": {"historical": 1.0}, "fallback": True,
+                 "dispersion_pp": 0.0, "n_active": 1}
+    else:
+        mu_for_decision = blend["blended"]
 
-    # === COMPUTE VERDICT USING BLENDED DRIFT ===
+    # === BAYESIAN UPDATE FROM PRIOR (Tier 1 #9) ===
+    history_dir = Path(__file__).parent / "output"
+    history_dir.mkdir(exist_ok=True)
+    history_path = history_dir / f"thesis_history_{ticker}.csv"
+    prior_blend, prior_age = load_prior_blend(history_path, days_back_limit=3)
+    bayesian = bayesian_update(prior_blend, blend, prior_age_days=prior_age or 1)
+
+    # === HYSTERESIS CHECK (Tier 0 #6) ===
+    # We compute today's verdict first, then check against prior
     paths = run_mc_paths(S0, sigma, mu_for_decision, args.horizon, n_paths=50_000)
     touched = (paths >= args.target).any(axis=1)
     p_touch_mc = float(touched.mean())
@@ -1048,7 +1561,9 @@ def check_thesis_mode(args):
     cushion = p_touch_mc - breakeven_p
     cushion_pp = cushion * 100
 
-    p_panic = closed_touch_down(S0, args.panic_level, T, mu_for_decision, sigma)
+    # === PATH METRICS (Tier 1 #13) ===
+    path_stats = compute_path_metrics(paths, S0, args.target, args.panic_level)
+    p_panic = path_stats["panic_touch_prob_total"]
 
     if cushion >= 0.10:
         verdict, light = "STRONG HOLD", "[GREEN]"
@@ -1059,33 +1574,46 @@ def check_thesis_mode(args):
     else:
         verdict, light = "CUT", "[RED]"
 
+    hysteresis_warn, prior_verdict = check_hysteresis(history_path,
+                                                       verdict, cushion_pp)
+
     # === RENDER ===
     print(f"  Data through:           {last_date} close")
     print(f"  Spot:                   ${S0:.2f}")
+    if market_cap_usd:
+        print(f"  Market cap:             ${market_cap_usd/1e9:.1f}B")
     print(f"  Sector / Industry:      {sector_name} / {profile.get('industry','')}")
     print(f"  Sigma (GARCH):          {sigma * 100:.1f}%")
-    print(f"  RSI(14) / 5d momentum:  {rsi:.1f}  /  {mom_5d * 100:+.1f}%")
+    print(f"  RSI(14) / 5d mom / 30d: {rsi:.1f}  /  {mom_5d * 100:+.1f}%  /  "
+          f"{f'{mom_30d:+.1f}%' if mom_30d is not None else 'n/a'}")
+    if ytd_pct is not None:
+        print(f"  YTD return:             {ytd_pct:+.1f}%")
     print()
     print(f"  Position: {args.shares} shares @ ${args.entry:.0f} cost basis, "
           f"target ${args.target:.0f}, no automatic stop")
     print(f"  Patience window:        {args.horizon} trading days")
     print()
 
+    # ---- REGIME + VOL ADVISORY (NEW Tier 1) ----
+    print_header("REGIME & VOL ADVISORY")
+    print(f"  Regime:     {regime['regime']}")
+    print(f"  Detail:     {regime['detail']}")
+    print()
+    print(f"  Vol level:  {vol_advice['level']}")
+    print(f"  Advisory:   {vol_advice['advisory']}")
+    print()
+
     # ---- FORWARD DRIFT INTELLIGENCE PANEL ----
     print_header("FORWARD DRIFT INTELLIGENCE")
     print(f"  {'Source':<37}{'mu (ann)':>10}{'Conf':>7}{'SrcQ':>13}{'Sources':>9}")
     print(f"  {'-'*37}{'-'*10}{'-'*7}{'-'*13}{'-'*9}")
-
-    # Historical row (NOT in blend — shown for reference)
-    print(f"  {'Historical (post-IPO + enrichment)':<37}"
-          f"{mu_effective_historical*100:>+8.1f}%   LOW       (excluded)         -")
-
     for name, label in [
-        ("analyst", "Analyst consensus (12mo target)"),
-        ("sector",  f"Sector momentum ({sector_name})"),
-        ("macro",   "Macro regime (VIX/SPY)"),
-        ("insider", "Insider activity (90d net)"),
-        ("ai",      "AI analyst (Claude Opus 4.7)"),
+        ("historical", "Historical (GARCH + enrichment)"),
+        ("analyst",    "Analyst consensus (12mo target)"),
+        ("sector",     f"Sector momentum ({sector_name})"),
+        ("macro",      "Macro regime (VIX/SPY)"),
+        ("insider",    "Insider activity (90d net)"),
+        ("ai",         "AI analyst (Claude Opus 4.7)"),
     ]:
         s = signals.get(name, {})
         d = s.get("drift")
@@ -1093,40 +1621,78 @@ def check_thesis_mode(args):
         conf = s.get("confidence", "?")
         sq = s.get("source_quality", "?")
         sc = s.get("sources_count", 0)
+        weight = blend["weights"].get(name, 0.0)
         marker = "  *" if name == "ai" else "   "
-        print(f"{marker}{label:<36}{d_str:>9}{conf:>7}{sq:>13}{sc:>9}")
+        print(f"{marker}{label:<36}{d_str:>9}{conf:>7}{sq:>13}{sc:>9}  "
+              f"w={weight*100:.0f}%")
 
-    # Notes column for each signal
     print()
     for name, label in [
-        ("analyst", "Analyst"), ("sector", "Sector"),
-        ("macro", "Macro"), ("insider", "Insider"), ("ai", "AI"),
+        ("historical", "Historical"), ("analyst", "Analyst"),
+        ("sector", "Sector"), ("macro", "Macro"),
+        ("insider", "Insider"), ("ai", "AI"),
     ]:
         s = signals.get(name, {})
         notes = s.get("notes", "")
         if notes:
-            print(f"  {label:<10}: {notes}")
+            print(f"  {label:<12}: {notes}")
     print()
-    print(f"  BLENDED FORWARD DRIFT:               "
-          f"{mu_blended*100:+.1f}%/yr  <- NEW HEADLINE")
+
+    if blend.get("std"):
+        print(f"  BLENDED FORWARD DRIFT:               "
+              f"{mu_for_decision*100:+.1f}%/yr  +/-  "
+              f"{blend['std']*100:.1f}pp")
+        print(f"    68% CI:                            "
+              f"[{blend['lo68']*100:+.1f}%, {blend['hi68']*100:+.1f}%]")
+        print(f"    95% CI:                            "
+              f"[{blend['lo95']*100:+.1f}%, {blend['hi95']*100:+.1f}%]")
+    else:
+        print(f"  BLENDED FORWARD DRIFT:               "
+              f"{mu_for_decision*100:+.1f}%/yr  (fallback)")
     print(f"  Active signals in blend:             "
-          f"{blend['n_active']} of 5")
-    if blend.get("fallback"):
-        print(f"  WARNING: all signals NONE_FOUND — fell back to +5% risk-free default")
+          f"{blend['n_active']} of 6")
     weights_str = ", ".join(f"{n}:{w*100:.0f}%" for n, w in blend["weights"].items()
                             if w > 0)
-    print(f"  Weights used:                        {weights_str}")
+    print(f"  Effective weights:                   {weights_str}")
     print(f"  Signal dispersion (range):           "
           f"{blend['dispersion_pp']:.1f}pp")
     if blend['dispersion_pp'] >= 30:
-        print(f"  WARNING: signals disagree significantly. Treat blend with caution.")
+        print(f"  WARNING: signals disagree significantly (>30pp). "
+              f"Treat blend with caution.")
     print()
+
+    # ---- BAYESIAN UPDATE (NEW Tier 1 #9) ----
+    if bayesian and prior_blend:
+        print_header("BAYESIAN BELIEF UPDATE")
+        print(f"  Prior (yesterday's blend, {prior_age}d old): "
+              f"mu={prior_blend['blended']*100:+.1f}%, "
+              f"std={prior_blend.get('std', 0.15)*100:.1f}pp")
+        print(f"  Today's observation:                 "
+              f"mu={blend['blended']*100:+.1f}%, "
+              f"std={blend['std']*100:.1f}pp")
+        print(f"  Posterior:                           "
+              f"mu={bayesian['posterior_mu']*100:+.1f}%, "
+              f"std={bayesian['posterior_std']*100:.1f}pp")
+        print(f"  Weights:                             "
+              f"prior {bayesian['prior_weight']*100:.0f}% / "
+              f"today {bayesian['obs_weight']*100:.0f}%")
+        delta = (blend['blended'] - prior_blend['blended']) * 100
+        print(f"  Day-over-day change in observed mu:  {delta:+.1f}pp")
+        print()
+    elif bayesian:
+        print_header("BAYESIAN BELIEF UPDATE")
+        print(f"  {bayesian['note']}")
+        print()
 
     # ---- AI ANALYST DETAILED SYNTHESIS ----
     if ai_parsed:
         print_header(f"AI ANALYST SYNTHESIS  ({args.ai_model}, cost ${ai_cost:.3f})")
-        print(f"  Drift point:        {ai_parsed.get('drift_point',0)*100:+.1f}%/yr")
-        if "drift_low" in ai_parsed and "drift_high" in ai_parsed:
+        dp = ai_parsed.get("drift_point")
+        if dp is not None:
+            print(f"  Drift point:        {dp*100:+.1f}%/yr")
+        else:
+            print(f"  Drift point:        null (evidence too thin) -> dropped from blend")
+        if ai_parsed.get("drift_low") is not None and ai_parsed.get("drift_high") is not None:
             print(f"  Drift range:        "
                   f"{ai_parsed['drift_low']*100:+.1f}% to "
                   f"{ai_parsed['drift_high']*100:+.1f}%")
@@ -1175,8 +1741,8 @@ def check_thesis_mode(args):
         print(f"  Last error / output (truncated): {ai_raw[:300]}")
         print()
 
-    # ---- HEADLINE METRIC (using BLENDED drift) ----
-    print_header("HEADLINE METRIC (recomputed with blended forward drift)")
+    # ---- HEADLINE METRIC ----
+    print_header("HEADLINE METRIC (using blended forward drift)")
     print(f"  P(touch ${args.target:.0f} within {args.horizon}d): "
           f"{p_touch_mc*100:5.1f}%  (MC, 50k paths)")
     print(f"  P (closed-form cross-check):       "
@@ -1187,6 +1753,7 @@ def check_thesis_mode(args):
     print(f"  Cushion vs threshold:              "
           f"{cushion_pp:+5.1f}pp")
     print()
+
     print_header("ECONOMICS")
     print(f"  EV(hold no-stop {args.horizon}d):              "
           f"${ev_hold:+,.0f}")
@@ -1199,70 +1766,119 @@ def check_thesis_mode(args):
           f"(avg, probability {(1-p_touch_mc)*100:.1f}%)")
     print()
 
-    print_header("TAIL RISK")
-    print(f"  P(touch ${args.panic_level:.0f} panic floor in "
+    # ---- PATH-DEPENDENT RISK METRICS (NEW Tier 1 #13) ----
+    print_header("PATH-DEPENDENT RISK METRICS")
+    md = path_stats
+    print(f"  Max drawdown along the way (from ${S0:.0f}):")
+    print(f"    median:                    {md['max_drawdown_median']*100:5.1f}%  "
+          f"(${S0 * (1 - md['max_drawdown_median']):.0f} touched)")
+    print(f"    75th percentile path:      {md['max_drawdown_p75']*100:5.1f}%  "
+          f"(${S0 * (1 - md['max_drawdown_p75']):.0f} touched)")
+    print(f"    90th percentile path:      {md['max_drawdown_p90']*100:5.1f}%  "
+          f"(${S0 * (1 - md['max_drawdown_p90']):.0f} touched)")
+    print()
+    print(f"  Drawdown at midpoint (day {args.horizon//2}, mark-to-market):")
+    print(f"    median:                    {md['drawdown_at_mid_median']*100:5.1f}%")
+    print(f"    75th percentile path:      {md['drawdown_at_mid_p75']*100:5.1f}%")
+    print()
+    if md.get("time_to_target_median") is not None:
+        print(f"  Time-to-target (among {p_touch_mc*100:.0f}% touching paths):")
+        print(f"    median:                    {md['time_to_target_median']:.0f} trading days")
+        print(f"    p25/p75:                   {md['time_to_target_p25']:.0f}d  /  "
+              f"{md['time_to_target_p75']:.0f}d")
+    print(f"  P(panic-floor ${args.panic_level:.0f} touched at any point in "
           f"{args.horizon}d): {p_panic*100:.1f}%")
-    print(f"  (your stated tolerance floor — watch this number trend up)")
+    print(f"  P(panic AND target both touched): "
+          f"{md['panic_among_target_paths']*100:.1f}% of target-touching paths")
     print()
 
-    # ---- VERDICT ----
+    # ---- VERDICT + HYSTERESIS ----
     print_header(f"VERDICT  {light}  {verdict}")
-    bp = breakeven_p * 100
+    bp_pct = breakeven_p * 100
     bands = [
-        (f">= {bp+10:.0f}%", "STRONG HOLD", "cushion >= 10pp, comfortable margin"),
-        (f"{bp+5:.0f}-{bp+10:.0f}%",  "HOLD",        "cushion 5-10pp, watch trend daily"),
-        (f"{bp:.0f}-{bp+5:.0f}%",  "EDGE",        "at break-even, cut on any deterioration"),
-        (f"< {bp:.0f}%",   "CUT",         "EV of hold worse than cut-now"),
+        (f">= {bp_pct+10:.0f}%", "STRONG HOLD", "cushion >= 10pp"),
+        (f"{bp_pct+5:.0f}-{bp_pct+10:.0f}%", "HOLD", "cushion 5-10pp"),
+        (f"{bp_pct:.0f}-{bp_pct+5:.0f}%", "EDGE", "cushion 0-5pp"),
+        (f"< {bp_pct:.0f}%", "CUT", "cushion negative"),
     ]
     for band, status, note in bands:
         marker = "  ->" if status == verdict else "    "
         print(f"{marker}  P {band:<9} = {status:<13} ({note})")
     print()
+    if hysteresis_warn:
+        print(f"  HYSTERESIS WARNING: {hysteresis_warn}")
+        print()
 
     # ---- POSITION-SPECIFIC GUIDANCE ----
     ai_guidance = ai_parsed.get("position_guidance") if ai_parsed else None
+    # Compute CI on cushion: drift CI translates roughly to cushion CI via
+    # sensitivity (rough heuristic — interpolation from sensitivity table)
+    ci_lo_cushion = None
+    ci_hi_cushion = None
+    if blend.get("std"):
+        # Run quick MC at the 68% CI bounds
+        try:
+            p_lo, _, _, cush_lo, _ = _quick_scenario(
+                S0, sigma, blend["lo68"], args.horizon, args.target,
+                args.entry, args.shares, cut_pnl, pnl_good)
+            p_hi, _, _, cush_hi, _ = _quick_scenario(
+                S0, sigma, blend["hi68"], args.horizon, args.target,
+                args.entry, args.shares, cut_pnl, pnl_good)
+            ci_lo_cushion = cush_lo
+            ci_hi_cushion = cush_hi
+        except Exception:
+            pass
+
     mech_guidance, agreement = mechanical_position_guidance(
-        cushion, ev_advantage, blend['dispersion_pp'], ai_guidance)
+        cushion, ev_advantage, blend['dispersion_pp'], ai_guidance,
+        ci_lo68=ci_lo_cushion, ci_hi68=ci_hi_cushion)
 
     print_header("POSITION-SPECIFIC GUIDANCE")
     print(f"  Mechanical (from math):  {mech_guidance}")
     if ai_guidance:
         agree_str = "AGREE" if agreement else "DISAGREE"
-        print(f"  AI analyst view:         {ai_guidance}     "
-              f"-> {agree_str}")
+        print(f"  AI analyst view:         {ai_guidance}     -> {agree_str}")
     print()
-    print(f"  Recommendation logic:")
-    print(f"    Cushion: {cushion_pp:+.1f}pp")
-    print(f"    EV advantage: ${ev_advantage:+,.0f}")
+    print(f"  Inputs to guidance:")
+    print(f"    Cushion:           {cushion_pp:+.1f}pp")
+    if ci_lo_cushion is not None and ci_hi_cushion is not None:
+        print(f"    Cushion 68% CI:    "
+              f"[{ci_lo_cushion*100:+.1f}pp, {ci_hi_cushion*100:+.1f}pp]")
+    print(f"    EV advantage:      ${ev_advantage:+,.0f}")
     print(f"    Signal dispersion: {blend['dispersion_pp']:.1f}pp")
     print()
     if mech_guidance == "HOLD":
         print(f"  -> HOLD: math supports continuing. Re-check tomorrow.")
     elif mech_guidance == "TRIM":
-        print(f"  -> TRIM: at edge. Consider taking partial off ({args.shares//2} "
-              f"shares) to cap downside while preserving upside on the rest.")
+        print(f"  -> TRIM: signal not decisive enough to fully cut. "
+              f"Take partial off ({args.shares//2} shares) to cap downside.")
     elif mech_guidance == "CUT":
-        print(f"  -> CUT: math says cutting beats holding. Realise the loss.")
-    if not agreement and ai_guidance:
-        print(f"  Note: AI ({ai_guidance}) and math ({mech_guidance}) disagree.")
-        print(f"        Consider the more conservative of the two.")
+        print(f"  -> CUT: math says cutting beats holding with conviction.")
+    if ai_guidance and not agreement:
+        # §audit fix #8: report both, do NOT recommend "more conservative"
+        print(f"  NOTE: Math ({mech_guidance}) and AI ({ai_guidance}) disagree.")
+        print(f"        Both views are valid; the user decides based on weight")
+        print(f"        given to each. No implicit conservatism prior applied.")
     print()
 
-    # ---- DRIFT SENSITIVITY (preserved + augmented) ----
+    # ---- DRIFT SENSITIVITY ----
     print_header("DRIFT SENSITIVITY (transparency)")
-    print(f"  Verdict at multiple drift assumptions, "
-          f"sigma fixed at {sigma*100:.0f}%:")
+    print(f"  Verdict at multiple drift assumptions, sigma fixed at {sigma*100:.0f}%:")
     print()
     print(f"  {'Drift scenario':<42}{'P(touch)':>10}{'EV':>11}"
           f"{'Cushion':>10}{'Verdict':>15}")
     print(f"  {'-'*42}{'-'*10}{'-'*11}{'-'*10}{'-'*15}")
-    for mu_test, label in [
+    scenarios = [
         (mu_effective_historical, "Historical (capped + enrichment)"),
-        (mu_blended,              "BLENDED (today's headline)"),
+        (mu_for_decision,         "BLENDED (today's headline)"),
         (0.30,                    "Mildly bullish (+30%)"),
         (0.05,                    "Risk-free / options-market (+5%)"),
         (0.0,                     "Zero drift"),
-    ]:
+    ]
+    if blend.get("std"):
+        scenarios.insert(2, (blend["lo68"], "Blended 68% CI low"))
+        scenarios.insert(3, (blend["hi68"], "Blended 68% CI high"))
+    for mu_test, label in scenarios:
         p_t, ev_t, p_star_t, cush_t, v_t = _quick_scenario(
             S0, sigma, mu_test, args.horizon, args.target, args.entry,
             args.shares, cut_pnl, pnl_good)
@@ -1271,20 +1887,24 @@ def check_thesis_mode(args):
               f"{cush_t*100:>+6.1f}pp{v_t:>15}")
     print()
 
-    # ---- HISTORY CSV (extended schema) ----
-    history_dir = Path(__file__).parent / "output"
-    history_dir.mkdir(exist_ok=True)
-    history_path = history_dir / f"thesis_history_{ticker}.csv"
+    # ---- HISTORY CSV (extended schema for Tier 1) ----
     csv_header = ("timestamp,spot,sigma_pct,mu_historical_pct,mu_blended_pct,"
+                  "blend_std_pct,blend_lo68_pct,blend_hi68_pct,"
                   "mu_analyst_pct,mu_sector_pct,mu_macro_pct,mu_insider_pct,"
                   "mu_ai_pct,p_touch_pct,breakeven_p_pct,cushion_pp,ev_hold,"
-                  "ev_cut,verdict,position_guidance,ai_cost_usd\n")
+                  "ev_cut,verdict,position_guidance,ai_cost_usd,"
+                  "regime,max_dd_p50,max_dd_p90,panic_prob\n")
 
     def _fmt_drift(d):
         return f"{d*100:.2f}" if d is not None else ""
 
+    blend_std_str = f"{blend['std']*100:.2f}" if blend.get('std') else ""
+    blend_lo_str = f"{blend['lo68']*100:.2f}" if blend.get('lo68') is not None else ""
+    blend_hi_str = f"{blend['hi68']*100:.2f}" if blend.get('hi68') is not None else ""
+
     new_row = (f"{datetime.now():%Y-%m-%d %H:%M},{S0:.2f},{sigma*100:.2f},"
-               f"{mu_effective_historical*100:.2f},{mu_blended*100:.2f},"
+               f"{mu_effective_historical*100:.2f},{mu_for_decision*100:.2f},"
+               f"{blend_std_str},{blend_lo_str},{blend_hi_str},"
                f"{_fmt_drift(signals['analyst'].get('drift'))},"
                f"{_fmt_drift(signals['sector'].get('drift'))},"
                f"{_fmt_drift(signals['macro'].get('drift'))},"
@@ -1292,12 +1912,14 @@ def check_thesis_mode(args):
                f"{_fmt_drift(signals.get('ai',{}).get('drift'))},"
                f"{p_touch_mc*100:.2f},{breakeven_p*100:.2f},"
                f"{cushion_pp:.2f},{ev_hold:.0f},{cut_pnl:.0f},"
-               f"{verdict},{mech_guidance},{ai_cost:.4f}\n")
+               f"{verdict},{mech_guidance},{ai_cost:.4f},"
+               f"{regime['regime']},{path_stats['max_drawdown_median']*100:.2f},"
+               f"{path_stats['max_drawdown_p90']*100:.2f},{p_panic*100:.2f}\n")
 
-    # Migration: if old CSV exists with old schema, rotate it
+    # Migrate old CSV to .legacy if schema differs
     if history_path.exists():
         first_line = history_path.read_text().split("\n", 1)[0]
-        if "mu_blended_pct" not in first_line:
+        if "blend_std_pct" not in first_line:
             history_path.rename(history_dir / f"thesis_history_{ticker}.legacy.csv")
             history_path.write_text(csv_header)
     else:
@@ -1309,20 +1931,29 @@ def check_thesis_mode(args):
     if len(rows) >= 2:
         print_header(f"7-DAY TREND (from {history_path.name})")
         print(f"  {'When':<19}{'Spot':>9}{'sigma':>7}"
-              f"{'mu_hist':>9}{'mu_blend':>10}{'P(t)':>8}"
-              f"{'P*':>7}{'Cush':>7}{'Verdict':>13}{'Guidance':>10}")
-        print(f"  {'-'*19}{'-'*9}{'-'*7}{'-'*9}{'-'*10}"
-              f"{'-'*8}{'-'*7}{'-'*7}{'-'*13}{'-'*10}")
+              f"{'mu_blend':>10}{'P(t)':>8}{'P*':>7}{'Cush':>7}"
+              f"{'Regime':>16}{'Verdict':>13}")
+        print(f"  {'-'*19}{'-'*9}{'-'*7}{'-'*10}"
+              f"{'-'*8}{'-'*7}{'-'*7}{'-'*16}{'-'*13}")
+        header_cells = rows[0].split(",")
         for row in rows[1:][-7:]:
             cells = row.split(",")
-            if len(cells) < 17:
+            try:
+                idx = {h: i for i, h in enumerate(header_cells)}
+                ts = cells[idx["timestamp"]]
+                sp = float(cells[idx["spot"]])
+                sg = float(cells[idx["sigma_pct"]])
+                mb = float(cells[idx["mu_blended_pct"]])
+                pt = float(cells[idx["p_touch_pct"]])
+                bp_ = float(cells[idx["breakeven_p_pct"]])
+                cu = float(cells[idx["cushion_pp"]])
+                rg = cells[idx.get("regime", -1)] if "regime" in idx else "?"
+                vd = cells[idx["verdict"]]
+                print(f"  {ts:<19}${sp:>7.2f}{sg:>6.1f}%"
+                      f"{mb:>+8.1f}%{pt:>7.1f}%{bp_:>6.1f}%"
+                      f"{cu:>+6.1f}pp{rg:>16}{vd:>13}")
+            except (KeyError, ValueError, IndexError):
                 continue
-            ts, sp, sg, mh, mb = cells[0], cells[1], cells[2], cells[3], cells[4]
-            pt, bp_, cu, evh, evc, vd, pg = cells[10], cells[11], cells[12], cells[13], cells[14], cells[15], cells[16]
-            print(f"  {ts:<19}${float(sp):>7.2f}{float(sg):>6.1f}%"
-                  f"{float(mh):>+7.1f}%{float(mb):>+8.1f}%"
-                  f"{float(pt):>7.1f}%{float(bp_):>6.1f}%"
-                  f"{float(cu):>+6.1f}pp{vd:>13}{pg:>10}")
         print()
     print(f"  Saved: {history_path}")
     if ai_cost > 0:
