@@ -19,9 +19,44 @@ SESSION 2 ENHANCEMENTS:
 One-liners describe the dip depth, not a probability number.
 """
 
+import csv
+import os
+
 from config import MIN_ACTIONABLE_DIP_PCT, PERCENTILE_TARGET
 from config_loader import get_config
 from datetime import datetime, timedelta
+
+
+# =============================================================
+# §2026-05-15 hysteresis support: load previous signals per ticker
+# from signal_history.csv to apply the sticky band around the
+# materiality threshold. See generate_signal() for the logic.
+# =============================================================
+
+def _load_previous_signals():
+    """Return {ticker: latest_signal} from data/signal_history.csv.
+    Returns empty dict on any failure (missing file, parse error, etc.).
+    Defensive — hysteresis is opt-in; broken history must not break the run."""
+    csv_path = os.path.join(os.path.dirname(__file__), '..', 'data', 'signal_history.csv')
+    csv_path = os.path.normpath(csv_path)
+    try:
+        if not os.path.isfile(csv_path):
+            return {}
+        latest = {}  # ticker -> (date_str, signal)
+        with open(csv_path, 'r', newline='') as f:
+            reader = csv.DictReader(f)
+            for row in reader:
+                ticker = (row.get('ticker') or '').strip()
+                signal = (row.get('signal') or '').strip()
+                date = (row.get('date') or '').strip()
+                if not ticker or signal not in ('BUY', 'WAIT'):
+                    continue
+                # Keep the most recent row per ticker (CSV is roughly chronological)
+                if ticker not in latest or date > latest[ticker][0]:
+                    latest[ticker] = (date, signal)
+        return {t: s for t, (_d, s) in latest.items()}
+    except Exception:
+        return {}
 
 
 # =============================================================
@@ -72,9 +107,34 @@ def suppress_stale_anchor(stock_data):
     return False, ''
 
 
-def generate_signal(current_price, percentile_low):
+def _hysteresis_threshold(previous_signal, base_threshold, buffer):
+    """
+    §2026-05-15 hysteresis: return the EFFECTIVE materiality threshold for a
+    ticker based on its previous-run signal. Prevents BUY/WAIT flipping caused
+    purely by Monte Carlo noise around the base threshold (e.g., WM at 2.9%
+    one run, 3.0% next — meaningless flip).
+
+    Logic:
+      previous=BUY  → stay BUY until dip% rises ABOVE base + buffer
+      previous=WAIT → stay WAIT until dip% falls BELOW base - buffer
+      previous=None (new ticker, no history) → use base threshold (no hysteresis)
+
+    Set hysteresis_buffer_pct = 0.0 in config.yaml to disable entirely.
+    """
+    if buffer is None or buffer <= 0:
+        return base_threshold
+    if previous_signal == 'BUY':
+        return base_threshold + buffer   # raise the bar to flip to WAIT
+    if previous_signal == 'WAIT':
+        return base_threshold - buffer   # lower the bar to flip to BUY
+    return base_threshold
+
+
+def generate_signal(current_price, percentile_low, previous_signal=None,
+                    hysteresis_buffer=None):
     """
     Determine BUY or WAIT based on dip depth vs materiality threshold.
+    Optionally applies hysteresis around the threshold using prior signal.
 
     Returns: ('BUY' or 'WAIT', reason_code, dip_pct)
     """
@@ -89,8 +149,11 @@ def generate_signal(current_price, percentile_low):
     if current_price <= percentile_low * 1.01:
         return 'BUY', 'at_target', dip_pct
 
-    # Materiality check: is the dip worth waiting for?
-    if dip_pct < MIN_ACTIONABLE_DIP_PCT:
+    # Materiality check with hysteresis: is the dip worth waiting for?
+    effective_threshold = _hysteresis_threshold(
+        previous_signal, MIN_ACTIONABLE_DIP_PCT, hysteresis_buffer
+    )
+    if dip_pct < effective_threshold:
         return 'BUY', 'immaterial', dip_pct
 
     # Dip is meaningful — WAIT
@@ -116,12 +179,15 @@ def generate_one_liner(signal, dip_pct, reason_code):
         return f"Expected dip only {dip_display} — not worth waiting. Buy today."
 
     # WAIT signals — vary by dip depth
+    # §2026-05-16: dropped trailing "({conviction}% conviction)" — redundant with
+    # the thresholds panel at the top of the dashboard which shows the live
+    # dip conviction target.
     if dip_pct >= 0.10:
-        return f"Deep {dip_display} dip expected ({conviction}% conviction). Hold firm. Wait."
+        return f"Deep {dip_display} dip expected. Hold firm. Wait."
     elif dip_pct >= 0.05:
-        return f"Strong {dip_display} dip expected ({conviction}% conviction). Be patient."
+        return f"Strong {dip_display} dip expected. Be patient."
     else:
-        return f"Moderate {dip_display} dip expected ({conviction}% conviction). Worth waiting."
+        return f"Moderate {dip_display} dip expected. Worth waiting."
 
 
 def format_date_range(median_date_index, days_window=7, earnings_date=None, macro_events=None):
@@ -184,11 +250,18 @@ def process_execution_signals(simulation_results, portfolio_data=None, macro_eve
     Refer to config.yaml regime_classifier.signal_modulation for behaviour map.
     """
     execution_data = {}
-    
+
     # §regime_classifier.signal_modulation — behavioural map per regime
     modulation_map = get_config('regime_classifier', 'signal_modulation', default={}) or {}
     # §regime_classifier.suppress_signals — master toggle for active modulation
     suppress_enabled = get_config('regime_classifier', 'suppress_signals', default=False)
+
+    # §2026-05-15 hysteresis: load previous signals per ticker from
+    # signal_history.csv to apply the sticky band around the materiality
+    # threshold. Empty dict if file missing or unreadable — falls back to
+    # base threshold (current behaviour).
+    hysteresis_buffer = get_config('signal', 'hysteresis_buffer_pct', default=0.0)
+    previous_signals = _load_previous_signals() if hysteresis_buffer > 0 else {}
 
     for ticker, result in simulation_results.items():
         if result.get('_exclude'):
@@ -203,7 +276,12 @@ def process_execution_signals(simulation_results, portfolio_data=None, macro_eve
         stock_data = portfolio_data.get(ticker, {}) if portfolio_data else {}
         anchor_suppressed, suppress_reason = suppress_stale_anchor(stock_data)
 
-        signal, reason_code, dip_pct = generate_signal(current, target)
+        prev_sig = previous_signals.get(ticker)
+        signal, reason_code, dip_pct = generate_signal(
+            current, target,
+            previous_signal=prev_sig,
+            hysteresis_buffer=hysteresis_buffer,
+        )
         one_liner = generate_one_liner(signal, dip_pct, reason_code)
 
       # Session 3: Generate fallback signal when primary is WAIT
@@ -291,17 +369,24 @@ def process_execution_signals(simulation_results, portfolio_data=None, macro_eve
         
         # §regime_classifier.signal_modulation — emit regime note FIRST regardless
         # of override, so traders see the regime context even when signal is already WAIT.
-        # Notes for suppress_buy regimes explain why the predicted dip is unlikely to fill.
+        # §2026-05-16 — the plain-English reasoning from regime_classifier.py is now
+        # self-contained and already explains WHAT the regime means + WHY it matters.
+        # Dropping the hardcoded technical-jargon prefixes that previously prepended
+        # the reasoning ("Breakdown — no reversal signal yet, dip-buy invalid until
+        # RSI>45 ...", "Momentum regime — predicted dip unlikely to fill ...", etc.).
+        # If the reasoning is empty (rare), fall back to a short label so the note
+        # block isn't blank.
         if suppress_enabled and action == 'suppress_buy':
-            # §May 13 patch: append reasoning only when non-empty; avoids orphan punctuation
-            reasoning_suffix = f" {regime_reasoning}" if regime_reasoning else ""
-            if regime == 'MOMENTUM':
-                regime_note = f"Momentum regime — predicted dip unlikely to fill (won't reverse soon).{reasoning_suffix}"
-            elif regime == 'SQUEEZE_RISK':
-                regime_note = f"Squeeze risk — rally may be forced, predicted dip unlikely until short interest clears.{reasoning_suffix}"
-            elif regime == 'BREAKDOWN':
-                regime_note = f"Breakdown — no reversal signal yet, dip-buy invalid until RSI>45 and 20d momentum positive.{reasoning_suffix}"
-            
+            short_labels = {
+                'MOMENTUM': 'Momentum regime detected.',
+                'SQUEEZE_RISK': 'Squeeze-risk regime detected.',
+                'BREAKDOWN': 'Breakdown regime detected.',
+            }
+            if regime_reasoning:
+                regime_note = regime_reasoning.strip()
+            else:
+                regime_note = short_labels.get(regime, '')
+
             # If signal was BUY, override to WAIT and adjust one-liner
             if signal == 'BUY':
                 signal = 'WAIT'
@@ -314,8 +399,11 @@ def process_execution_signals(simulation_results, portfolio_data=None, macro_eve
                     one_liner = "Breakdown regime — dip-buy suppressed. Wait for reversal confirmation (RSI>45 + 20d momentum positive)."
         elif action == 'boost_conviction' and signal in ('BUY', 'WAIT'):
             # §regime_classifier.signal_modulation.OVERSOLD_REVERSAL
-            reasoning_suffix = f" {regime_reasoning}" if regime_reasoning else ""
-            regime_note = f"Oversold reversal — high-conviction setup.{reasoning_suffix}"
+            # §2026-05-16: same simplification — let reasoning speak for itself.
+            if regime_reasoning:
+                regime_note = regime_reasoning.strip()
+            else:
+                regime_note = 'Oversold reversal detected — high-conviction setup.'
             if signal == 'BUY':
                 one_liner = f"⭐ {one_liner} Oversold reversal regime — conviction elevated."
 

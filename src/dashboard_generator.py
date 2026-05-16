@@ -307,7 +307,9 @@ def generate_html(execution_data, macro_regime, vix, portfolio_data,
         rally_pct = data.get('rally_pct', 0)
         rally_date_range = data.get('rally_date_range', '')
         if rally_price and rally_pct > 0.01:  # Only show if >1% rally expected
-            rally_display = f"⬆️ {ccy}{rally_price:.2f} · {rally_date_range} (+{rally_pct*100:.1f}% rally, 60% conviction)"
+            # §2026-05-16: removed trailing "60% conviction" — redundant with the
+            # thresholds panel at top of the dashboard
+            rally_display = f"⬆️ {ccy}{rally_price:.2f} · {rally_date_range} (+{rally_pct*100:.1f}% rally)"
 
         # 🔮 Analyst consensus line
         consensus_display = ""
@@ -340,8 +342,9 @@ def generate_html(execution_data, macro_regime, vix, portfolio_data,
                 rsi_class = "rsi-low"
             rsi_display = f'<span class="rsi {rsi_class}">RSI {rsi_val:.0f}</span>'
 
-        # Conviction display (fixed at PERCENTILE_TARGET%)
-        conviction_display = f" Dip conviction: {PERCENTILE_TARGET}%"
+        # §2026-05-16: per-stock conviction display removed — redundant with
+        # the thresholds panel at the top of the dashboard.
+        conviction_display = ""
 
         # Session 3: Fallback signal rendering
         fallback_html = ""
@@ -354,55 +357,70 @@ def generate_html(execution_data, macro_regime, vix, portfolio_data,
                 </div>
             '''
 
-        # §May 14 daily probability bands feature — per-stock collapsible cone
-        # Lower band: 70% of paths sit at-or-above on Day N (30th percentile)
-        # Upper band: 60% of paths sit at-or-below on Day N (60th percentile)
-        # These are statistical summaries across 10K paths, NOT daily predictions.
-        # Wrinkle (see 04_NEXT_BUILD_SPEC.md): Day-60 lower will NOT equal the
-        # headline dip target — headline uses minima distribution, daily bands
-        # use per-day price distributions. Different statistics, both valid.
+        # §2026-05-15 daily bands rebuild — median path + zone highlighting
+        # See monte_carlo.py extract_statistics() for the math. The table shows
+        # the median Monte Carlo path's price each day with the predicted dip
+        # and rally date ranges highlighted as visual zones.
         daily_bands_html = ''
         db_list = data.get('daily_bands') or []
         if db_list:
+            zone_label = {
+                'rally': '⬆ rally zone',
+                'dip': '⬇ dip zone',
+                '': '',
+            }
+            zone_class = {
+                'rally': 'db-rally',
+                'dip': 'db-dip',
+                '': '',
+            }
             db_rows = []
+            prev_zone = None
             for i, band in enumerate(db_list):
                 day_n = band.get('day', i + 1)
-                lower = band.get('lower', 0.0)
-                upper = band.get('upper', 0.0)
-                spread = upper - lower
+                median_price = band.get('median_price', 0.0)
+                zone = band.get('zone', '')
                 date_str = _band_dates[i].strftime('%b %d') if i < len(_band_dates) else ''
+                # Mark zone STARTS/ENDS for visual scannability
+                label = zone_label.get(zone, '')
+                if zone and zone != prev_zone:
+                    label = f"{label} STARTS"
+                # peek ahead for end-of-zone marker
+                next_zone = db_list[i + 1].get('zone', '') if i + 1 < len(db_list) else ''
+                if zone and next_zone != zone:
+                    label = f"{label} ENDS" if 'STARTS' not in label else label
+                prev_zone = zone
+                css = zone_class.get(zone, '')
                 db_rows.append(
-                    f"<tr><td>{day_n}</td><td>{date_str}</td>"
-                    f"<td>{ccy}{lower:.2f}</td><td>{ccy}{upper:.2f}</td>"
-                    f"<td>{ccy}{spread:.2f}</td></tr>"
+                    f'<tr class="{css}"><td>{day_n}</td><td>{date_str}</td>'
+                    f'<td>{ccy}{median_price:.2f}</td><td>{label}</td></tr>'
                 )
             db_rows_html = "".join(db_rows)
-            dip_conv = PERCENTILE_TARGET
-            up_conv = 100 - 40  # rally conviction is 60 today; if config changes, update
             daily_bands_html = (
                 '<details class="daily-bands">'
-                '<summary>📊 Daily probability bands (60-day window) — click to expand</summary>'
+                '<summary>📊 Daily expected path (60-day window) — click to expand</summary>'
                 '<div class="db-preamble">'
-                '<p><strong>How to read this:</strong> Each day shows two prices — '
-                f'a <strong>lower band</strong> (~{dip_conv}% of simulated paths have gone '
-                f'AS LOW AS this price by that day) and an <strong>upper band</strong> '
-                '(~60% of paths have reached AS HIGH AS this price by that day). These '
-                'are cumulative reach probabilities across 10,000 simulated paths.</p>'
-                '<p><strong>By Day 60, the lower band converges to the headline dip target '
-                'above, and the upper band converges to the headline rally target.</strong> '
-                'The bands show how confidence builds day-by-day toward those endpoints — '
-                'useful for swing-trade entry/exit timing.</p>'
-                '<p><em>Still NOT a "buy on Day X" signal.</em> Each band is a statistical '
-                'reach probability, not a price prediction for that specific day. The '
-                'headline dip and rally targets remain the primary action levels.</p>'
+                '<p><strong>How to read this:</strong> The "Median price" column shows '
+                'where the typical Monte Carlo path has this stock each day — i.e., the '
+                'middle of 10,000 simulated futures.</p>'
+                '<p>The <strong>⬇ dip zone</strong> (red-tinted rows) highlights when the '
+                'predicted dip is most likely to occur (±7 days around the median dip date). '
+                'The <strong>⬆ rally zone</strong> (green-tinted rows) highlights when the '
+                'predicted rally is most likely (±7 days around the median rally date).</p>'
+                '<p>The lowest median price typically falls inside the dip zone (matching '
+                'the headline dip date range), and the highest typically falls inside the '
+                'rally zone (matching the headline rally date range).</p>'
+                '<p><em>This is one typical scenario out of 10,000. Reality could be '
+                'shallower, deeper, or arrive on different days. The headline dip and '
+                'rally targets remain the primary action levels.</em></p>'
                 '<p><em>If a regime override warning appears on this stock above, '
-                'those caveats apply here too — the projected descent toward the dip target '
-                'is just as "unlikely to fill" as the target itself.</em></p>'
+                'those caveats apply here too — the projected descent toward the dip '
+                'target is just as "unlikely to fill" as the target itself.</em></p>'
                 '</div>'
                 '<div class="db-scroll">'
                 '<table class="db-table">'
-                '<thead><tr><th>Day</th><th>Date</th><th>Lower 70%</th>'
-                '<th>Upper 60%</th><th>Spread</th></tr></thead>'
+                '<thead><tr><th>Day</th><th>Date</th><th>Median price</th>'
+                '<th>Zone</th></tr></thead>'
                 f'<tbody>{db_rows_html}</tbody>'
                 '</table>'
                 '</div>'
@@ -459,7 +477,6 @@ def generate_html(execution_data, macro_regime, vix, portfolio_data,
                 <div class="price-row">{ccy}{display_price:.2f} (today)</div>
                 <div class="target-row">{target_display}</div>
                 <div class="target-row" style="color: #4ade80;">{rally_display}</div>
-                <div class="confidence-row">{conviction_display}</div>
                 <div class="oneliner">{data['one_liner']}</div>
                 {regime_note_html}
                 {fallback_html}
@@ -470,6 +487,27 @@ def generate_html(execution_data, macro_regime, vix, portfolio_data,
             <td class="earnings">{earnings_display}</td>
         </tr>
         """
+
+    # §2026-05-15: thresholds panel — surface live config settings at top
+    # §2026-05-16: trimmed per Jesse — removed MC paths + hysteresis buffer
+    # lines (internal plumbing; not needed in user-facing panel)
+    from config_loader import get_config as _gc
+    dip_conv = _gc('signal', 'percentile_target', default=70)
+    rally_conv = _gc('signal', 'rally_conviction_percentile', default=60)
+    mat_thresh = _gc('signal', 'min_actionable_dip_pct', default=0.03)
+    mc_days = _gc('monte_carlo', 'simulation_days', default=60)
+    thresholds_panel_html = (
+        '<div class="thresholds-panel">'
+        '<strong>🎯 SYSTEM SETTINGS (live from config.yaml)</strong>'
+        '<ul>'
+        f'<li>Dip conviction target: <b>{dip_conv}%</b> of simulated paths touch the dip price</li>'
+        f'<li>Rally conviction target: <b>{rally_conv}%</b> of simulated paths touch the rally price</li>'
+        f'<li>Materiality threshold: <b>{mat_thresh*100:.1f}%</b> '
+        '(predicted dip must exceed this to trigger WAIT)</li>'
+        f'<li>Forecast horizon: <b>{mc_days} days</b></li>'
+        '</ul>'
+        '</div>'
+    )
 
     # §2026-05-14: cost banner — shows actual AI spend for this run
     if run_ai_cost_usd is not None and run_ai_cost_usd > 0:
@@ -704,7 +742,23 @@ def generate_html(execution_data, macro_regime, vix, portfolio_data,
         }}
         .db-table td:first-child, .db-table td:nth-child(2) {{ text-align: left; }}
         .db-table tbody tr:nth-child(even) {{ background: #1f2532; }}
+        /* §2026-05-15 zone highlighting on the median-path table */
+        .db-table tr.db-rally {{ background: rgba(74, 222, 128, 0.10) !important; }}
+        .db-table tr.db-dip   {{ background: rgba(248, 113, 113, 0.10) !important; }}
         .db-scroll {{ max-height: 360px; overflow-y: auto; }}
+
+        /* §2026-05-15 thresholds panel at top of dashboard
+           §2026-05-16 explicitly left-aligned (parent .header is centered) */
+        .thresholds-panel {{
+            background: #1a1f2e; border: 1px solid #2d3548;
+            border-left: 3px solid #ffa726;
+            padding: 10px 14px; margin-top: 12px; border-radius: 4px;
+            font-size: 0.85em; color: #c0c5d0;
+            text-align: left;
+        }}
+        .thresholds-panel strong {{ color: #ffa726; display: block; margin-bottom: 6px; }}
+        .thresholds-panel ul {{ margin: 4px 0 0 0; padding-left: 18px; line-height: 1.55; }}
+        .thresholds-panel ul b {{ color: #d4dae0; }}
 
         .run-btn {{
             display: inline-block; padding: 6px 18px; background: #4a9eff;
@@ -728,11 +782,16 @@ def generate_html(execution_data, macro_regime, vix, portfolio_data,
             .backtest-stats {{ flex-direction: column; gap: 10px; }}
             .bt-bucket {{ font-size: 0.8em; }}
 
-            /* §2026-05-14: mobile responsiveness for outer stock table */
-            table {{ display: block; }}
-            thead {{ display: none; }}
-            tbody {{ display: block; }}
-            tr {{
+            /* §2026-05-15 mobile: stack ONLY the outer signal table (.signal-table).
+               §2026-05-16 BUG FIX: must use direct-child selectors
+               (> tbody > tr > td) so the nested .db-table TDs inside daily-bands
+               are NOT affected. Previously `.signal-table td` matched all
+               descendant TDs including .db-table cells, which made the daily
+               bands table also stack at narrow widths. */
+            .signal-table {{ display: block; }}
+            .signal-table > thead {{ display: none; }}
+            .signal-table > tbody {{ display: block; }}
+            .signal-table > tbody > tr {{
                 display: block;
                 margin-bottom: 14px;
                 border: 1px solid #2d3548;
@@ -740,33 +799,48 @@ def generate_html(execution_data, macro_regime, vix, portfolio_data,
                 padding: 10px;
                 background: #161b28;
             }}
-            td {{
+            .signal-table > tbody > tr > td {{
                 display: block;
                 width: 100%;
                 border: none;
                 padding: 4px 0;
             }}
-            td.ticker {{
+            .signal-table > tbody > tr > td.ticker {{
                 font-size: 1.1em; font-weight: 700;
                 border-bottom: 1px solid #2d3548;
                 padding-bottom: 6px; margin-bottom: 6px;
             }}
-            td.earnings {{
+            .signal-table > tbody > tr > td.earnings {{
                 color: #88a0c8; font-size: 0.85em;
                 border-top: 1px solid #2d3548;
                 padding-top: 6px; margin-top: 6px;
             }}
 
-            /* §2026-05-14: daily bands table — horizontal scroll on mobile */
+            /* §2026-05-16: daily bands table — 4 columns must fit phone width
+               in a single row. Smaller font, tight padding, no wrapping, and
+               narrow widths on Day/Date so Median+Zone get the space they need. */
             .db-scroll {{
-                overflow-x: auto;
+                overflow-x: hidden;
                 -webkit-overflow-scrolling: touch;
+                max-height: 50vh;
+                overflow-y: auto;
             }}
             .db-table {{
-                font-size: 0.72em;
-                min-width: 380px;  /* prevent ultra-narrow columns */
+                font-size: 0.65em;
+                min-width: 0;
+                width: 100%;
+                table-layout: fixed;
             }}
-            .db-table th, .db-table td {{ padding: 3px 5px; }}
+            .db-table th, .db-table td {{
+                padding: 3px 2px;
+                white-space: nowrap;
+                overflow: hidden;
+                text-overflow: ellipsis;
+            }}
+            .db-table th:nth-child(1), .db-table td:nth-child(1) {{ width: 12%; }}
+            .db-table th:nth-child(2), .db-table td:nth-child(2) {{ width: 22%; }}
+            .db-table th:nth-child(3), .db-table td:nth-child(3) {{ width: 28%; }}
+            .db-table th:nth-child(4), .db-table td:nth-child(4) {{ width: 38%; }}
         }}
     </style>
 </head>
@@ -785,6 +859,7 @@ def generate_html(execution_data, macro_regime, vix, portfolio_data,
                 <a href="https://github.com/smartbalanced-sgc/sgc-dip-engine/actions" target="_blank" class="run-btn">▶ Run Now</a>
             </div>
             {cost_banner_html}
+            {thresholds_panel_html}
         </div>
 
         {warning_html}
@@ -804,7 +879,7 @@ def generate_html(execution_data, macro_regime, vix, portfolio_data,
             </div>
         </div>
 
-        <table>
+        <table class="signal-table">
             <thead>
                 <tr>
                     <th>Stock</th>

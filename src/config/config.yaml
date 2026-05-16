@@ -94,6 +94,14 @@ signal:
   # Applies to BOTH primary and fallback signals
   min_actionable_dip_pct: 0.03
 
+  # §2026-05-15 hysteresis buffer around the materiality threshold
+  # Prevents BUY/WAIT flipping when MC noise pushes dip% across the line
+  # (e.g., WM at 2.9% one run, 3.0% next run — stuck stays stuck).
+  # If currently BUY:  stay BUY until dip% rises above threshold + buffer
+  # If currently WAIT: stay WAIT until dip% drops below threshold - buffer
+  # Set to 0.0 to disable hysteresis entirely.
+  hysteresis_buffer_pct: 0.005
+
   # Rally target conviction: % of paths that reach rally target OR HIGHER
   # 60 = 60% of paths reach this high (uses 40th percentile of maximums)
   # Raise to show more conservative (shallower) rally targets

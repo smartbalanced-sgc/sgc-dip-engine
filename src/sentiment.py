@@ -304,20 +304,50 @@ def analyze_emergency(ticker, stock_data, catalyst_details, client):
     profile = stock_data.get('profile', {}) or {}
     company_name = profile.get('companyName', ticker)
     return_pct = catalyst_details.get('return_pct', 0)
-    
-    prompt = f"""Search for news about {company_name} ({ticker}) in the last 24 hours.
-The stock moved {return_pct:+.1f}% today with no visible catalyst in analyst data.
+    today_str = datetime.now().strftime('%Y-%m-%d')
 
-What caused this move? Is the investment thesis at risk?
+    # §2026-05-15 emergency search prompt upgrade — adds explicit source-quality
+    # rules, multi-source confirmation requirement, date filtering, and defined
+    # thesis criteria. Reduces false positives from old news, single-source
+    # rumours, and AI-generated content.
+    prompt = f"""Investigate news for {company_name} ({ticker}) explaining a
+{return_pct:+.1f}% move on {today_str}.
 
-Answer in EXACTLY this format (2 lines only):
+SEARCH PRIORITIES (in order):
+1. SEC filings (8-K, 10-Q) from {today_str} or the past 24 hours
+2. Company official press releases / investor relations
+3. Top financial outlets: Reuters, Bloomberg, WSJ, FT, CNBC
+4. Sector/market context: did the broader sector or market move similarly?
+
+SKEPTICISM RULES:
+- Require AT LEAST 2 independent reputable sources for any thesis-affecting claim
+- Distinguish HARD NEWS (filings, official announcements) from SOFT NEWS
+  (analyst opinions, leaked rumors, social media speculation)
+- If only one source or only social media, label SOURCE_QUALITY as SPECULATIVE
+- If no credible explanation found, label INTACT with reason
+  "no fundamental news; likely technical/sector move"
+
+THESIS CRITERIA:
+- INTACT: move explained by ordinary causes (sector rotation, technical,
+  no fundamental change). Investment case unchanged.
+- AT_RISK: deteriorating signals from credible sources but not yet confirmed
+  (one major outlet only, analyst downgrade, unusual SEC activity).
+- CRITICAL: confirmed material event from 2+ primary/reputable sources
+  (earnings miss, guidance cut, executive departure, regulatory action,
+  lawsuit, M&A, fraud).
+
+OUTPUT EXACTLY (5 lines):
+SOURCE_QUALITY: PRIMARY / REPUTABLE / SPECULATIVE / NONE_FOUND
+SOURCES_COUNT: <integer — distinct credible sources>
 THESIS: INTACT / AT_RISK / CRITICAL
-REASON: [max 100 chars citing specific news found]"""
+CONFIDENCE: HIGH / MEDIUM / LOW
+REASON: [max 200 chars — name top source explicitly, e.g.,
+        'Reuters + Bloomberg: Q1 guidance cut to $X from $Y']"""
 
     try:
         response = client.messages.create(
             model="claude-sonnet-4-20250514",
-            max_tokens=150,
+            max_tokens=300,  # §2026-05-15: raised for 5-line structured output
             tools=[{
                 "type": "web_search_20250305",
                 "name": "web_search"
@@ -467,22 +497,49 @@ def _parse_ai_response(text, trigger_type):
                 result['narrative'] = line.split('REASON:')[1].strip()[:100]
     
     elif trigger_type == 'emergency':
+        # §2026-05-15 emergency parser — handles new 5-line structured output:
+        # SOURCE_QUALITY, SOURCES_COUNT, THESIS, CONFIDENCE, REASON
         result['thesis_status'] = 'INTACT'
         result['narrative'] = ''
-        
+        result['source_quality'] = 'NONE_FOUND'
+        result['sources_count'] = 0
+        result['confidence'] = 'MEDIUM'
+
         for line in text.split('\n'):
             line = line.strip()
-            if 'THESIS:' in line:
-                val = line.split('THESIS:')[1].strip().upper()
+            if line.startswith('SOURCE_QUALITY:'):
+                val = line.split(':', 1)[1].strip().upper()
+                if val in ('PRIMARY', 'REPUTABLE', 'SPECULATIVE', 'NONE_FOUND'):
+                    result['source_quality'] = val
+            elif line.startswith('SOURCES_COUNT:'):
+                try:
+                    result['sources_count'] = int(
+                        ''.join(c for c in line.split(':', 1)[1] if c.isdigit()) or '0'
+                    )
+                except Exception:
+                    result['sources_count'] = 0
+            elif line.startswith('THESIS:'):
+                val = line.split(':', 1)[1].strip().upper()
                 if 'CRITICAL' in val:
                     result['thesis_status'] = 'CRITICAL'
                 elif 'AT_RISK' in val or 'RISK' in val:
                     result['thesis_status'] = 'AT_RISK'
                 else:
                     result['thesis_status'] = 'INTACT'
-            elif 'REASON:' in line:
-                result['narrative'] = line.split('REASON:')[1].strip()[:120]
-    
+            elif line.startswith('CONFIDENCE:'):
+                val = line.split(':', 1)[1].strip().upper()
+                if val in ('HIGH', 'MEDIUM', 'LOW'):
+                    result['confidence'] = val
+            elif line.startswith('REASON:'):
+                result['narrative'] = line.split(':', 1)[1].strip()[:200]
+
+        # §2026-05-15 quality gate: downgrade thesis if source quality is poor.
+        # A "CRITICAL" finding from a single speculative source isn't actionable.
+        if result['source_quality'] == 'SPECULATIVE' and result['thesis_status'] == 'CRITICAL':
+            result['thesis_status'] = 'AT_RISK'
+        if result['source_quality'] == 'NONE_FOUND' and result['thesis_status'] != 'INTACT':
+            result['thesis_status'] = 'INTACT'
+
     return result
 
 

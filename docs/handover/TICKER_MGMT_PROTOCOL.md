@@ -226,13 +226,18 @@ The cost estimate is rough but useful. Formula:
 
 ```
 N                = total tickers in config.yaml
-N_skipped        = count of plan-blocked tickers (.L, .GB suffixes) — usually 2-3
-N_vol_excluded   = expected vol-gate exclusions — typical 4-6 small caps
+N_skipped        = count of plan-blocked tickers (.L, .GB suffixes) — usually 1-3
+N_vol_excluded   = expected vol-gate exclusions — typical 4-8 small caps
 N_modelable      = N - N_skipped - N_vol_excluded
 
-base_per_run         = 0.10   # regime AI baseline + buy prioritization
-per_modelable_stock  = 0.04   # average AI burn per modelable stock per run
-per_excluded_stock   = 0.005  # rule-based classification only; minimal AI
+# §2026-05-15 calibrated against actual run cost of $0.77 @ 39 tickers
+# (down from earlier $1.45 estimate that over-counted per-stock contribution).
+# Most cost is fixed per run: 1-3 regime AI triggers + occasional emergency
+# search. Per-stock variable cost is small because most stocks generate $0 of
+# AI activity per run.
+base_per_run         = 0.40   # 1-3 regime AI triggers + occasional emergency search
+per_modelable_stock  = 0.005  # mostly fixed; per-stock variable is small
+per_excluded_stock   = 0.001  # rule-based classification only; AI skipped
 
 est_cost_per_run  = base_per_run
                   + N_modelable * per_modelable_stock
@@ -243,17 +248,29 @@ est_annual = est_cost_per_run * 252  # trading days
 
 ### Example
 
-Portfolio: 41 tickers. 2 plan-blocked. 5 vol-excluded (typical). Modelable: 34.
+Portfolio: 39 tickers. 1 plan-blocked (IGLN.L). 8 vol-excluded (typical for
+current portfolio with new small caps). Modelable: 30.
 
-- est_cost_per_run = 0.10 + 34 × 0.04 + 5 × 0.005 = 0.10 + 1.36 + 0.025 = $1.49
-- est_annual = $375
+- est_cost_per_run = 0.40 + 30 × 0.005 + 8 × 0.001 = 0.40 + 0.150 + 0.008 = $0.56
+- est_annual = $0.56 × 252 ≈ $141
 
 **Response format:**
 
-> Added X (Y). Portfolio now 41 tickers. Est cost per run: ~$1.49. Annual at
-> 1 run/day: ~$375.
+> Added X (Y). Portfolio now 39 tickers. Est cost per run: ~$0.56. Annual at
+> 1 run/day: ~$141.
 >
 > #End
+
+### Calibration history
+
+| Date | Source | base | per_modelable | per_excluded |
+|---|---|---|---|---|
+| 2026-05-14 | initial guess | 0.10 | 0.04 | 0.005 |
+| 2026-05-15 | calibrated to $0.77 actual @ 39 tickers | **0.40** | **0.005** | **0.001** |
+
+Future calibrations: after 30+ runs of real cost-tracking data, refine these
+constants again. The dashboard cost banner shows actual cost per run; compare
+to the estimator's output and adjust if they diverge meaningfully.
 
 ### Calibration over time
 
