@@ -372,14 +372,6 @@ REASONING: [max 200 chars — cite top source by name]"""
         text_parts = [block.text for block in response.content if hasattr(block, 'text')]
         text = "\n".join(text_parts) if text_parts else ""
 
-        # §2026-05-16 TEMP DEBUG: dump raw AI text so we can fix the parser
-        # when REASONING comes back empty (as observed on CSCO on 2026-05-16).
-        # Remove this block after the parser is verified working.
-        print(f"      🔬 [DEBUG-AI-RAW {ticker}] ---START---")
-        for line in text.split('\n'):
-            print(f"      🔬 [DEBUG-AI-RAW {ticker}] {line!r}")
-        print(f"      🔬 [DEBUG-AI-RAW {ticker}] ---END---")
-
         # §2026-05-14 cost optimisation: compute real cost from response.usage
         # rather than hardcoded estimate. Sonnet 4 pricing + web search tool.
         from sentiment import compute_call_cost
@@ -413,57 +405,80 @@ def _parse_ai_regime_response(text):
     """Parse Claude's structured regime response.
     §2026-05-15 upgraded format adds SOURCE_QUALITY + SOURCES_COUNT and uses
     categorical CONFIDENCE (HIGH/MEDIUM/LOW). Legacy numeric CONFIDENCE still
-    accepted for backward-compat."""
+    accepted for backward-compat.
+    §2026-05-16 multi-line REASONING support: AI puts 'REASONING:' on one
+    line and content on subsequent lines. Slurp continuation lines until we
+    hit another known keyword."""
     import re
     result = {}
     confidence_word_map = {'HIGH': 0.85, 'MEDIUM': 0.65, 'LOW': 0.45}
+    KEYWORDS = ('REGIME:', 'CONFIDENCE:', 'SHORT_INTEREST:', 'SOURCE_QUALITY:',
+                'SOURCES_COUNT:', 'REASONING:', 'SOURCES:')
 
-    for line in text.split('\n'):
-        line = line.strip()
-        if line.startswith('REGIME:'):
-            val = line.split('REGIME:', 1)[1].strip().upper()
+    reasoning_parts = []
+    in_reasoning = False
+
+    for raw_line in text.split('\n'):
+        stripped = raw_line.strip()
+        starts_kw = any(stripped.startswith(kw) for kw in KEYWORDS)
+
+        if starts_kw:
+            in_reasoning = False  # any keyword ends a multi-line REASONING
+
+        if stripped.startswith('REGIME:'):
+            val = stripped.split('REGIME:', 1)[1].strip().upper()
             for r in ['MOMENTUM', 'SQUEEZE_RISK', 'NORMAL']:
                 if r in val:
                     result['regime'] = r
                     break
-        elif line.startswith('CONFIDENCE:'):
-            val = line.split('CONFIDENCE:', 1)[1].strip().upper()
-            # New format: HIGH / MEDIUM / LOW
+        elif stripped.startswith('CONFIDENCE:'):
+            val = stripped.split('CONFIDENCE:', 1)[1].strip().upper()
             mapped = next((confidence_word_map[w] for w in confidence_word_map if w in val), None)
             if mapped is not None:
                 result['confidence'] = mapped
             else:
-                # Legacy numeric fallback
                 m = re.search(r'(\d+\.?\d*)', val)
                 if m:
                     conf = float(m.group(1))
                     if conf > 1.0:
                         conf = conf / 100.0
                     result['confidence'] = min(max(conf, 0.0), 1.0)
-        elif line.startswith('SHORT_INTEREST:'):
-            result['short_interest'] = line.split('SHORT_INTEREST:', 1)[1].strip()[:60]
-        elif line.startswith('SOURCE_QUALITY:'):
-            val = line.split('SOURCE_QUALITY:', 1)[1].strip().upper()
+        elif stripped.startswith('SHORT_INTEREST:'):
+            result['short_interest'] = stripped.split('SHORT_INTEREST:', 1)[1].strip()[:60]
+        elif stripped.startswith('SOURCE_QUALITY:'):
+            val = stripped.split('SOURCE_QUALITY:', 1)[1].strip().upper()
             if val in ('PRIMARY', 'REPUTABLE', 'SPECULATIVE', 'NONE_FOUND'):
                 result['source_quality'] = val
-        elif line.startswith('SOURCES_COUNT:'):
+        elif stripped.startswith('SOURCES_COUNT:'):
             try:
                 result['sources_count'] = int(
-                    ''.join(c for c in line.split(':', 1)[1] if c.isdigit()) or '0'
+                    ''.join(c for c in stripped.split(':', 1)[1] if c.isdigit()) or '0'
                 )
             except Exception:
                 result['sources_count'] = 0
-        elif line.startswith('REASONING:'):
-            result['reasoning'] = line.split('REASONING:', 1)[1].strip()[:200]
-        elif line.startswith('SOURCES:'):
-            # Legacy field — keep for backward-compat with older cached entries
-            result['sources'] = line.split('SOURCES:', 1)[1].strip()[:200]
+        elif stripped.startswith('REASONING:'):
+            inline = stripped.split('REASONING:', 1)[1].strip()
+            if inline:
+                reasoning_parts.append(inline)
+            in_reasoning = True  # capture subsequent lines until next keyword
+        elif stripped.startswith('SOURCES:'):
+            result['sources'] = stripped.split('SOURCES:', 1)[1].strip()[:200]
+        elif in_reasoning and stripped:
+            # Multi-line REASONING continuation
+            reasoning_parts.append(stripped)
+
+    # Stitch the reasoning text back together
+    if reasoning_parts:
+        reasoning = ' '.join(reasoning_parts).strip()
+        # Clean up footnote-style ". \n. \n" patterns the AI uses for citations
+        reasoning = re.sub(r'\s*\.\s*\.\s*', '. ', reasoning)
+        reasoning = re.sub(r'\s+', ' ', reasoning).strip()
+        result['reasoning'] = reasoning[:400]
 
     # §2026-05-15 quality gate: SPECULATIVE source single-handedly cannot upgrade
     # the regime label. If AI says SQUEEZE_RISK from one speculative source, fall
     # back to MOMENTUM (less drastic). NONE_FOUND can't override at all.
     if result.get('source_quality') == 'NONE_FOUND':
-        # AI failed to find anything credible; trust the rule-based result
         result.pop('regime', None)
         result.pop('confidence', None)
     elif (result.get('source_quality') == 'SPECULATIVE'

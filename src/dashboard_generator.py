@@ -783,12 +783,15 @@ def generate_html(execution_data, macro_regime, vix, portfolio_data,
             .bt-bucket {{ font-size: 0.8em; }}
 
             /* §2026-05-15 mobile: stack ONLY the outer signal table (.signal-table).
-               Daily bands table (.db-table) stays a normal table with horizontal
-               scroll — fixes the broken vertical stacking reported on iPhone. */
+               §2026-05-16 BUG FIX: must use direct-child selectors
+               (> tbody > tr > td) so the nested .db-table TDs inside daily-bands
+               are NOT affected. Previously `.signal-table td` matched all
+               descendant TDs including .db-table cells, which made the daily
+               bands table also stack at narrow widths. */
             .signal-table {{ display: block; }}
-            .signal-table thead {{ display: none; }}
-            .signal-table tbody {{ display: block; }}
-            .signal-table tr {{
+            .signal-table > thead {{ display: none; }}
+            .signal-table > tbody {{ display: block; }}
+            .signal-table > tbody > tr {{
                 display: block;
                 margin-bottom: 14px;
                 border: 1px solid #2d3548;
@@ -796,18 +799,18 @@ def generate_html(execution_data, macro_regime, vix, portfolio_data,
                 padding: 10px;
                 background: #161b28;
             }}
-            .signal-table td {{
+            .signal-table > tbody > tr > td {{
                 display: block;
                 width: 100%;
                 border: none;
                 padding: 4px 0;
             }}
-            .signal-table td.ticker {{
+            .signal-table > tbody > tr > td.ticker {{
                 font-size: 1.1em; font-weight: 700;
                 border-bottom: 1px solid #2d3548;
                 padding-bottom: 6px; margin-bottom: 6px;
             }}
-            .signal-table td.earnings {{
+            .signal-table > tbody > tr > td.earnings {{
                 color: #88a0c8; font-size: 0.85em;
                 border-top: 1px solid #2d3548;
                 padding-top: 6px; margin-top: 6px;
