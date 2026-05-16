@@ -179,12 +179,15 @@ def generate_one_liner(signal, dip_pct, reason_code):
         return f"Expected dip only {dip_display} — not worth waiting. Buy today."
 
     # WAIT signals — vary by dip depth
+    # §2026-05-16: dropped trailing "({conviction}% conviction)" — redundant with
+    # the thresholds panel at the top of the dashboard which shows the live
+    # dip conviction target.
     if dip_pct >= 0.10:
-        return f"Deep {dip_display} dip expected ({conviction}% conviction). Hold firm. Wait."
+        return f"Deep {dip_display} dip expected. Hold firm. Wait."
     elif dip_pct >= 0.05:
-        return f"Strong {dip_display} dip expected ({conviction}% conviction). Be patient."
+        return f"Strong {dip_display} dip expected. Be patient."
     else:
-        return f"Moderate {dip_display} dip expected ({conviction}% conviction). Worth waiting."
+        return f"Moderate {dip_display} dip expected. Worth waiting."
 
 
 def format_date_range(median_date_index, days_window=7, earnings_date=None, macro_events=None):
@@ -366,17 +369,24 @@ def process_execution_signals(simulation_results, portfolio_data=None, macro_eve
         
         # §regime_classifier.signal_modulation — emit regime note FIRST regardless
         # of override, so traders see the regime context even when signal is already WAIT.
-        # Notes for suppress_buy regimes explain why the predicted dip is unlikely to fill.
+        # §2026-05-16 — the plain-English reasoning from regime_classifier.py is now
+        # self-contained and already explains WHAT the regime means + WHY it matters.
+        # Dropping the hardcoded technical-jargon prefixes that previously prepended
+        # the reasoning ("Breakdown — no reversal signal yet, dip-buy invalid until
+        # RSI>45 ...", "Momentum regime — predicted dip unlikely to fill ...", etc.).
+        # If the reasoning is empty (rare), fall back to a short label so the note
+        # block isn't blank.
         if suppress_enabled and action == 'suppress_buy':
-            # §May 13 patch: append reasoning only when non-empty; avoids orphan punctuation
-            reasoning_suffix = f" {regime_reasoning}" if regime_reasoning else ""
-            if regime == 'MOMENTUM':
-                regime_note = f"Momentum regime — predicted dip unlikely to fill (won't reverse soon).{reasoning_suffix}"
-            elif regime == 'SQUEEZE_RISK':
-                regime_note = f"Squeeze risk — rally may be forced, predicted dip unlikely until short interest clears.{reasoning_suffix}"
-            elif regime == 'BREAKDOWN':
-                regime_note = f"Breakdown — no reversal signal yet, dip-buy invalid until RSI>45 and 20d momentum positive.{reasoning_suffix}"
-            
+            short_labels = {
+                'MOMENTUM': 'Momentum regime detected.',
+                'SQUEEZE_RISK': 'Squeeze-risk regime detected.',
+                'BREAKDOWN': 'Breakdown regime detected.',
+            }
+            if regime_reasoning:
+                regime_note = regime_reasoning.strip()
+            else:
+                regime_note = short_labels.get(regime, '')
+
             # If signal was BUY, override to WAIT and adjust one-liner
             if signal == 'BUY':
                 signal = 'WAIT'
@@ -389,8 +399,11 @@ def process_execution_signals(simulation_results, portfolio_data=None, macro_eve
                     one_liner = "Breakdown regime — dip-buy suppressed. Wait for reversal confirmation (RSI>45 + 20d momentum positive)."
         elif action == 'boost_conviction' and signal in ('BUY', 'WAIT'):
             # §regime_classifier.signal_modulation.OVERSOLD_REVERSAL
-            reasoning_suffix = f" {regime_reasoning}" if regime_reasoning else ""
-            regime_note = f"Oversold reversal — high-conviction setup.{reasoning_suffix}"
+            # §2026-05-16: same simplification — let reasoning speak for itself.
+            if regime_reasoning:
+                regime_note = regime_reasoning.strip()
+            else:
+                regime_note = 'Oversold reversal detected — high-conviction setup.'
             if signal == 'BUY':
                 one_liner = f"⭐ {one_liner} Oversold reversal regime — conviction elevated."
 
