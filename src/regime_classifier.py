@@ -180,6 +180,10 @@ def _classify_rule_based(metrics):
     # §2026-05-16: reasoning strings rewritten in plain English so the
     # dashboard regime note is understandable to a non-technical reader.
     # Technical numbers retained at the end in parentheses for power users.
+    # §2026-05-16 (later) — Fix 1+3: dynamic prose that varies by metric
+    # magnitude AND covers BOTH dip-buy entry perspective AND rally-exit
+    # perspective so the note serves traders considering a buy AND traders
+    # already holding watching for an exit.
 
     # ---------- SQUEEZE_RISK (check first — tightest thresholds) ----------
     # §regime_classifier.squeeze_risk — all four conditions AND logic
@@ -187,15 +191,22 @@ def _classify_rule_based(metrics):
         mom_5d is not None and mom_5d >= sq_cfg.get('momentum_5d_min', 0.15) and
         decoup is not None and decoup >= sq_cfg.get('sector_decoupling_min', 0.10) and
         rel_vol is not None and rel_vol >= sq_cfg.get('relative_volume_min', 1.8)):
+        # Dynamic magnitude descriptors
+        rsi_word = 'extreme' if rsi >= 85 else 'very high'
+        vol_word = 'exceptional' if rel_vol >= 3.0 else 'very heavy' if rel_vol >= 2.0 else 'elevated'
+        decoup_word = 'dramatically' if decoup >= 0.20 else 'sharply' if decoup >= 0.15 else 'noticeably'
         return {
             'regime': 'SQUEEZE_RISK',
-            'confidence': 0.70,  # Probabilistic without short interest data
+            'confidence': 0.70,
             'reasoning': (
-                "This rally looks forced, not driven by fundamentals — the "
-                "price is extremely overheated, has shot up sharply on heavy "
-                "volume, and is moving far ahead of its sector. These conditions "
-                "often precede a sharp reversal. Chasing here is risky; the "
-                "predicted dip is unlikely to fill in the near term. "
+                f"This rally looks forced, not driven by fundamentals — RSI is {rsi_word} "
+                f"and price has spiked on {vol_word} volume while {decoup_word} outpacing "
+                f"its sector. Squeeze setups often unwind sharply without warning. "
+                f"For entry: chasing here is risky; the predicted dip is unlikely to "
+                f"fill in the near term but a violent reversal could hit suddenly. "
+                f"If you're already holding: take profit aggressively or scale out — "
+                f"squeezes often unwind faster than they built up; exit on strength "
+                f"rather than waiting for the full rally target. "
                 f"(RSI {rsi:.0f}, 5d +{mom_5d*100:.1f}%, "
                 f"sector decoupling +{decoup*100:.1f}pp, volume {rel_vol:.1f}x)"
             ),
@@ -208,14 +219,21 @@ def _classify_rule_based(metrics):
         mom_5d is not None and mom_5d >= mom_cfg.get('momentum_5d_min', 0.10) and
         decoup is not None and decoup >= mom_cfg.get('sector_decoupling_min', 0.05) and
         rel_vol is not None and rel_vol >= mom_cfg.get('relative_volume_min', 1.3)):
+        mom_word = 'strongly' if mom_5d >= 0.15 else 'solidly' if mom_5d >= 0.12 else 'steadily'
+        vol_word = 'heavy' if rel_vol >= 1.6 else 'above-average'
         return {
             'regime': 'MOMENTUM',
             'confidence': 0.80,
             'reasoning': (
-                "Strong upward trend with real buying behind it — overbought "
-                "but rallying steadily, outperforming its sector on above-average "
-                "volume. The predicted dip is unlikely to fill in the near "
-                "term — buying now or skipping may be wiser than waiting. "
+                f"Strong upward trend with real buying behind it — RSI is overbought "
+                f"but the stock is rallying {mom_word} on {vol_word} volume, outperforming "
+                f"its sector. "
+                f"For entry: the predicted dip target is unlikely to fill in the "
+                f"near term — buying now or skipping may be wiser than waiting for "
+                f"a dip that may not come. "
+                f"If you're already holding: the predicted rally target is achievable, "
+                f"but watch for exhaustion (RSI rolling below 70, volume drying up, "
+                f"sector cooling). Trim if exhaustion appears; let the runner go if not. "
                 f"(RSI {rsi:.0f}, 5d +{mom_5d*100:.1f}%, "
                 f"sector +{decoup*100:.1f}pp, volume {rel_vol:.1f}x)"
             ),
@@ -230,15 +248,22 @@ def _classify_rule_based(metrics):
     if (rsi is not None and rsi <= osr_cfg.get('rsi_max', 30) and
         dd is not None and dd <= -osr_cfg.get('drawdown_from_high_min', 0.10) and
         rel_vol is not None and rel_vol >= osr_cfg.get('relative_volume_min', 1.2)):
+        dd_word = 'deeply' if dd <= -0.30 else 'significantly' if dd <= -0.20 else 'moderately'
+        rsi_word = 'extremely' if rsi <= 20 else 'very' if rsi <= 25 else 'moderately'
         return {
             'regime': 'OVERSOLD_REVERSAL',
             'confidence': 0.75,
             'reasoning': (
-                "Stock looks washed out — deeply discounted and momentum is "
-                "weak, but unusually heavy volume suggests possible capitulation "
-                "buying (forced sellers giving up, often a sign of a bottom). "
-                "High-conviction setup for a bounce. Small caps can keep "
-                "falling — size accordingly. "
+                f"Stock looks washed out — {dd_word} discounted at "
+                f"{abs(dd)*100:.0f}% below recent high with {rsi_word} oversold RSI, "
+                f"but unusually heavy volume suggests capitulation selling (forced "
+                f"sellers giving up, often a sign of a bottom forming). "
+                f"For entry: high-conviction setup for a bounce. Small caps can "
+                f"keep falling — size accordingly; consider a partial entry with "
+                f"room to add if it bottoms further. "
+                f"If you're already holding: this setup suggests the worst may "
+                f"be near — consider holding through a relief bounce rather than "
+                f"panic-selling at the lows. "
                 f"(RSI {rsi:.0f}, drawdown {dd*100:.1f}%, volume {rel_vol:.1f}x)"
             ),
             'metrics': metrics,
@@ -249,33 +274,42 @@ def _classify_rule_based(metrics):
     if (dd is not None and dd <= -bd_cfg.get('drawdown_from_high_min', 0.15) and
         mom_20d is not None and mom_20d <= bd_cfg.get('momentum_20d_max', -0.10) and
         rsi is not None and rsi <= bd_cfg.get('rsi_max', 45)):
+        dd_word = 'catastrophically' if dd <= -0.50 else 'deeply' if dd <= -0.30 else 'significantly'
+        mom_word = 'collapsed' if mom_20d <= -0.30 else 'dropped sharply' if mom_20d <= -0.15 else 'weakened'
         return {
             'regime': 'BREAKDOWN',
             'confidence': 0.75,
             'reasoning': (
-                "Stock is in a sustained downtrend with no sign of bottoming — "
-                "significantly below its recent peak, has dropped further over "
-                "the past month, and momentum remains weak. Don't try to catch "
-                "a falling knife — wait for clearer reversal signals before "
-                "considering a buy. The predicted dip target is unlikely to "
-                "fill cleanly while the trend is still down. "
+                f"Stock is in a sustained downtrend with no sign of bottoming — "
+                f"{dd_word} below its 60-day peak (-{abs(dd)*100:.0f}%), price "
+                f"has {mom_word} over the past month, and momentum (RSI {rsi:.0f}) "
+                f"remains weak. "
+                f"For entry: don't try to catch a falling knife — wait for clearer "
+                f"reversal signals (RSI recovering above 45, 20-day momentum turning "
+                f"positive, volume picking up on green days) before considering a buy. "
+                f"If you're already holding: the predicted rally target is unlikely "
+                f"to fully materialise either — consider trimming on any strength or "
+                f"using a stop-loss to limit further drawdown rather than waiting "
+                f"for the model's rally that may not come. "
                 f"(Drawdown {dd*100:.1f}% from 60-day high, "
                 f"20-day return {mom_20d*100:.1f}%, RSI {rsi:.0f})"
             ),
             'metrics': metrics,
         }
-    
+
     # ---------- NORMAL (default) ----------
     return {
         'regime': 'NORMAL',
         'confidence': 0.85,
         'reasoning': (
             "Stock is behaving within normal ranges — no signs of squeeze, "
-            "extreme momentum, capitulation, or breakdown. Standard dip-buy "
-            "logic applies; trust the headline dip and rally targets."
+            "extreme momentum, capitulation, or breakdown. For entry: standard "
+            "dip-buy logic applies; trust the headline dip target. For exit: "
+            "standard rally logic applies; trust the headline rally target."
         ),
         'metrics': metrics,
     }
+
 
 
 # =============================================================
@@ -358,7 +392,11 @@ CONFIDENCE: HIGH / MEDIUM / LOW
 SHORT_INTEREST: [% of float if found within last 14 days, else "not found" or "stale"]
 SOURCE_QUALITY: PRIMARY / REPUTABLE / SPECULATIVE / NONE_FOUND
 SOURCES_COUNT: <integer — distinct credible sources>
-REASONING: [max 200 chars — cite top source by name]"""
+REASONING: [max 500 chars, MUST cover BOTH perspectives in plain English:
+  (1) cite the top 1-2 sources by name explaining the move/regime;
+  (2) "For entry:" what should someone considering a BUY do?
+  (3) "If you're already holding:" what should someone watching for an EXIT do?
+  All three on the same line — concise and actionable.]"""
 
     try:
         response = client.messages.create(
@@ -473,7 +511,7 @@ def _parse_ai_regime_response(text):
         # Clean up footnote-style ". \n. \n" patterns the AI uses for citations
         reasoning = re.sub(r'\s*\.\s*\.\s*', '. ', reasoning)
         reasoning = re.sub(r'\s+', ' ', reasoning).strip()
-        result['reasoning'] = reasoning[:400]
+        result['reasoning'] = reasoning[:700]  # §2026-05-16: bumped from 400 for dual-perspective output
 
     # §2026-05-15 quality gate: SPECULATIVE source single-handedly cannot upgrade
     # the regime label. If AI says SQUEEZE_RISK from one speculative source, fall
