@@ -307,7 +307,9 @@ def generate_html(execution_data, macro_regime, vix, portfolio_data,
         rally_pct = data.get('rally_pct', 0)
         rally_date_range = data.get('rally_date_range', '')
         if rally_price and rally_pct > 0.01:  # Only show if >1% rally expected
-            rally_display = f"⬆️ {ccy}{rally_price:.2f} · {rally_date_range} (+{rally_pct*100:.1f}% rally, 60% conviction)"
+            # §2026-05-16: removed trailing "60% conviction" — redundant with the
+            # thresholds panel at top of the dashboard
+            rally_display = f"⬆️ {ccy}{rally_price:.2f} · {rally_date_range} (+{rally_pct*100:.1f}% rally)"
 
         # 🔮 Analyst consensus line
         consensus_display = ""
@@ -340,8 +342,9 @@ def generate_html(execution_data, macro_regime, vix, portfolio_data,
                 rsi_class = "rsi-low"
             rsi_display = f'<span class="rsi {rsi_class}">RSI {rsi_val:.0f}</span>'
 
-        # Conviction display (fixed at PERCENTILE_TARGET%)
-        conviction_display = f" Dip conviction: {PERCENTILE_TARGET}%"
+        # §2026-05-16: per-stock conviction display removed — redundant with
+        # the thresholds panel at the top of the dashboard.
+        conviction_display = ""
 
         # Session 3: Fallback signal rendering
         fallback_html = ""
@@ -474,7 +477,6 @@ def generate_html(execution_data, macro_regime, vix, portfolio_data,
                 <div class="price-row">{ccy}{display_price:.2f} (today)</div>
                 <div class="target-row">{target_display}</div>
                 <div class="target-row" style="color: #4ade80;">{rally_display}</div>
-                <div class="confidence-row">{conviction_display}</div>
                 <div class="oneliner">{data['one_liner']}</div>
                 {regime_note_html}
                 {fallback_html}
@@ -487,19 +489,13 @@ def generate_html(execution_data, macro_regime, vix, portfolio_data,
         """
 
     # §2026-05-15: thresholds panel — surface live config settings at top
+    # §2026-05-16: trimmed per Jesse — removed MC paths + hysteresis buffer
+    # lines (internal plumbing; not needed in user-facing panel)
     from config_loader import get_config as _gc
     dip_conv = _gc('signal', 'percentile_target', default=70)
     rally_conv = _gc('signal', 'rally_conviction_percentile', default=60)
     mat_thresh = _gc('signal', 'min_actionable_dip_pct', default=0.03)
-    hyst_buf = _gc('signal', 'hysteresis_buffer_pct', default=0.0)
-    mc_paths = _gc('monte_carlo', 'num_paths', default=10000)
     mc_days = _gc('monte_carlo', 'simulation_days', default=60)
-    hyst_line = (
-        f'<li>Hysteresis buffer: <b>{hyst_buf*100:.2f}%</b> '
-        f'(anti-flap around the materiality threshold)</li>'
-        if hyst_buf > 0 else
-        '<li>Hysteresis buffer: <b>off</b> (signal may flip near the threshold on MC noise)</li>'
-    )
     thresholds_panel_html = (
         '<div class="thresholds-panel">'
         '<strong>🎯 SYSTEM SETTINGS (live from config.yaml)</strong>'
@@ -508,8 +504,6 @@ def generate_html(execution_data, macro_regime, vix, portfolio_data,
         f'<li>Rally conviction target: <b>{rally_conv}%</b> of simulated paths touch the rally price</li>'
         f'<li>Materiality threshold: <b>{mat_thresh*100:.1f}%</b> '
         '(predicted dip must exceed this to trigger WAIT)</li>'
-        f'{hyst_line}'
-        f'<li>Monte Carlo paths: <b>{mc_paths:,}</b> per stock per run</li>'
         f'<li>Forecast horizon: <b>{mc_days} days</b></li>'
         '</ul>'
         '</div>'
@@ -753,12 +747,14 @@ def generate_html(execution_data, macro_regime, vix, portfolio_data,
         .db-table tr.db-dip   {{ background: rgba(248, 113, 113, 0.10) !important; }}
         .db-scroll {{ max-height: 360px; overflow-y: auto; }}
 
-        /* §2026-05-15 thresholds panel at top of dashboard */
+        /* §2026-05-15 thresholds panel at top of dashboard
+           §2026-05-16 explicitly left-aligned (parent .header is centered) */
         .thresholds-panel {{
             background: #1a1f2e; border: 1px solid #2d3548;
             border-left: 3px solid #ffa726;
             padding: 10px 14px; margin-top: 12px; border-radius: 4px;
             font-size: 0.85em; color: #c0c5d0;
+            text-align: left;
         }}
         .thresholds-panel strong {{ color: #ffa726; display: block; margin-bottom: 6px; }}
         .thresholds-panel ul {{ margin: 4px 0 0 0; padding-left: 18px; line-height: 1.55; }}
@@ -817,16 +813,31 @@ def generate_html(execution_data, macro_regime, vix, portfolio_data,
                 padding-top: 6px; margin-top: 6px;
             }}
 
-            /* Daily bands table — horizontal scroll only, no stacking */
+            /* §2026-05-16: daily bands table — 4 columns must fit phone width
+               in a single row. Smaller font, tight padding, no wrapping, and
+               narrow widths on Day/Date so Median+Zone get the space they need. */
             .db-scroll {{
-                overflow-x: auto;
+                overflow-x: hidden;
                 -webkit-overflow-scrolling: touch;
+                max-height: 50vh;
+                overflow-y: auto;
             }}
             .db-table {{
-                font-size: 0.72em;
-                min-width: 320px;
+                font-size: 0.65em;
+                min-width: 0;
+                width: 100%;
+                table-layout: fixed;
             }}
-            .db-table th, .db-table td {{ padding: 3px 5px; }}
+            .db-table th, .db-table td {{
+                padding: 3px 2px;
+                white-space: nowrap;
+                overflow: hidden;
+                text-overflow: ellipsis;
+            }}
+            .db-table th:nth-child(1), .db-table td:nth-child(1) {{ width: 12%; }}
+            .db-table th:nth-child(2), .db-table td:nth-child(2) {{ width: 22%; }}
+            .db-table th:nth-child(3), .db-table td:nth-child(3) {{ width: 28%; }}
+            .db-table th:nth-child(4), .db-table td:nth-child(4) {{ width: 38%; }}
         }}
     </style>
 </head>

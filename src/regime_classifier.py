@@ -177,6 +177,10 @@ def _classify_rule_based(metrics):
     osr_cfg = get_config('regime_classifier', 'oversold_reversal', default={})
     bd_cfg = get_config('regime_classifier', 'breakdown', default={})
     
+    # §2026-05-16: reasoning strings rewritten in plain English so the
+    # dashboard regime note is understandable to a non-technical reader.
+    # Technical numbers retained at the end in parentheses for power users.
+
     # ---------- SQUEEZE_RISK (check first — tightest thresholds) ----------
     # §regime_classifier.squeeze_risk — all four conditions AND logic
     if (rsi is not None and rsi >= sq_cfg.get('rsi_min', 80) and
@@ -187,12 +191,17 @@ def _classify_rule_based(metrics):
             'regime': 'SQUEEZE_RISK',
             'confidence': 0.70,  # Probabilistic without short interest data
             'reasoning': (
-                f"RSI {rsi:.0f} extreme + 5d move +{mom_5d*100:.1f}% + "
-                f"sector decoupling +{decoup*100:.1f}pp + volume {rel_vol:.1f}x"
+                "This rally looks forced, not driven by fundamentals — the "
+                "price is extremely overheated, has shot up sharply on heavy "
+                "volume, and is moving far ahead of its sector. These conditions "
+                "often precede a sharp reversal. Chasing here is risky; the "
+                "predicted dip is unlikely to fill in the near term. "
+                f"(RSI {rsi:.0f}, 5d +{mom_5d*100:.1f}%, "
+                f"sector decoupling +{decoup*100:.1f}pp, volume {rel_vol:.1f}x)"
             ),
             'metrics': metrics,
         }
-    
+
     # ---------- MOMENTUM (more permissive than SQUEEZE) ----------
     # §regime_classifier.momentum — all four conditions AND logic
     if (rsi is not None and rsi >= mom_cfg.get('rsi_min', 75) and
@@ -203,12 +212,16 @@ def _classify_rule_based(metrics):
             'regime': 'MOMENTUM',
             'confidence': 0.80,
             'reasoning': (
-                f"RSI {rsi:.0f} overbought + 5d +{mom_5d*100:.1f}% + "
-                f"sector +{decoup*100:.1f}pp + volume {rel_vol:.1f}x"
+                "Strong upward trend with real buying behind it — overbought "
+                "but rallying steadily, outperforming its sector on above-average "
+                "volume. The predicted dip is unlikely to fill in the near "
+                "term — buying now or skipping may be wiser than waiting. "
+                f"(RSI {rsi:.0f}, 5d +{mom_5d*100:.1f}%, "
+                f"sector +{decoup*100:.1f}pp, volume {rel_vol:.1f}x)"
             ),
             'metrics': metrics,
         }
-    
+
     # ---------- OVERSOLD_REVERSAL (check before BREAKDOWN — more specific) ----------
     # §regime_classifier.oversold_reversal — all three conditions AND logic
     # Volume confirmation distinguishes capitulation (reversal candidate) from
@@ -221,11 +234,16 @@ def _classify_rule_based(metrics):
             'regime': 'OVERSOLD_REVERSAL',
             'confidence': 0.75,
             'reasoning': (
-                f"RSI {rsi:.0f} oversold + drawdown {dd*100:.1f}% + volume {rel_vol:.1f}x"
+                "Stock looks washed out — deeply discounted and momentum is "
+                "weak, but unusually heavy volume suggests possible capitulation "
+                "buying (forced sellers giving up, often a sign of a bottom). "
+                "High-conviction setup for a bounce. Small caps can keep "
+                "falling — size accordingly. "
+                f"(RSI {rsi:.0f}, drawdown {dd*100:.1f}%, volume {rel_vol:.1f}x)"
             ),
             'metrics': metrics,
         }
-    
+
     # ---------- BREAKDOWN (sustained decline, no reversal) ----------
     # §regime_classifier.breakdown — all three conditions AND logic
     if (dd is not None and dd <= -bd_cfg.get('drawdown_from_high_min', 0.15) and
@@ -235,7 +253,14 @@ def _classify_rule_based(metrics):
             'regime': 'BREAKDOWN',
             'confidence': 0.75,
             'reasoning': (
-                f"Drawdown {dd*100:.1f}% + 20d {mom_20d*100:.1f}% + RSI {rsi:.0f} weak"
+                "Stock is in a sustained downtrend with no sign of bottoming — "
+                "significantly below its recent peak, has dropped further over "
+                "the past month, and momentum remains weak. Don't try to catch "
+                "a falling knife — wait for clearer reversal signals before "
+                "considering a buy. The predicted dip target is unlikely to "
+                "fill cleanly while the trend is still down. "
+                f"(Drawdown {dd*100:.1f}% from 60-day high, "
+                f"20-day return {mom_20d*100:.1f}%, RSI {rsi:.0f})"
             ),
             'metrics': metrics,
         }
@@ -244,7 +269,11 @@ def _classify_rule_based(metrics):
     return {
         'regime': 'NORMAL',
         'confidence': 0.85,
-        'reasoning': 'No extreme regime signals',
+        'reasoning': (
+            "Stock is behaving within normal ranges — no signs of squeeze, "
+            "extreme momentum, capitulation, or breakdown. Standard dip-buy "
+            "logic applies; trust the headline dip and rally targets."
+        ),
         'metrics': metrics,
     }
 
@@ -342,12 +371,20 @@ REASONING: [max 200 chars — cite top source by name]"""
         # Extract text from response (may have web_search tool use blocks)
         text_parts = [block.text for block in response.content if hasattr(block, 'text')]
         text = "\n".join(text_parts) if text_parts else ""
-        
+
+        # §2026-05-16 TEMP DEBUG: dump raw AI text so we can fix the parser
+        # when REASONING comes back empty (as observed on CSCO on 2026-05-16).
+        # Remove this block after the parser is verified working.
+        print(f"      🔬 [DEBUG-AI-RAW {ticker}] ---START---")
+        for line in text.split('\n'):
+            print(f"      🔬 [DEBUG-AI-RAW {ticker}] {line!r}")
+        print(f"      🔬 [DEBUG-AI-RAW {ticker}] ---END---")
+
         # §2026-05-14 cost optimisation: compute real cost from response.usage
         # rather than hardcoded estimate. Sonnet 4 pricing + web search tool.
         from sentiment import compute_call_cost
         cost_tracker['total'] += compute_call_cost(response, had_web_search=True)
-        
+
         # Parse structured response
         ai_result = _parse_ai_regime_response(text)
         
