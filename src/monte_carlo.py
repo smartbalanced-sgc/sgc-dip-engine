@@ -312,40 +312,38 @@ def extract_statistics(paths, current_price):
     terminal_prices = paths[:, -1]
     terminal_median = float(np.median(terminal_prices))
 
-    # §May 14 daily probability bands — CUMULATIVE min/max interpretation
-    # (rebuilt 2026-05-14 from per-day percentiles after wrinkle review)
-    # §signal.percentile_target — dip conviction (default 70)
-    # §signal.rally_conviction_percentile — rally conviction (default 60)
-    #
-    # Semantics under cumulative interpretation:
-    #   Lower band on Day N = price X such that {dip_conviction}% of paths
-    #     have already touched X-or-lower by Day N (i.e., 70% went as low
-    #     as X by Day N). Computed as the (100 - dip_conviction)th
-    #     percentile of each path's running-minimum up to Day N.
-    #   Upper band on Day N = price Y such that {rally_conviction}% of paths
-    #     have already touched Y-or-higher by Day N (i.e., 60% reached as
-    #     high as Y by Day N). Computed as the (100 - rally_conviction)th
-    #     percentile of each path's running-maximum up to Day N.
-    #
-    # These converge EXACTLY to the headline dip/rally targets at Day 60
-    # (because the Day 60 running-min/max = the path's full-window min/max,
-    # which is what the headline percentile is computed from). No wrinkle.
-    dip_conviction = get_config('signal', 'percentile_target', default=70)
-    rally_conviction = get_config('signal', 'rally_conviction_percentile', default=60)
+    # §May 14 (rebuilt 2026-05-15) — daily bands as MEDIAN PATH + ZONES
+    # Previous interpretations (per-day percentile, cumulative running min/max)
+    # both produced confusing values for users. This rebuild shows the simplest,
+    # most intuitive view:
+    #   - "median_price" = where the typical Monte Carlo path is each day
+    #     (np.median across paths at each day). Naturally fluctuates.
+    #   - "zone" = 'rally' / 'dip' / '' based on whether the day falls within
+    #     ±7 days of the headline rally/dip date indices. Renders as visually
+    #     highlighted rows in the dashboard, marking when the predicted dip
+    #     and rally are most likely to occur.
+    # Headline dip/rally targets and date indices are computed above and are
+    # unchanged. This block only adds presentation data for the dashboard.
+    median_per_day = np.median(paths, axis=0)
+    ZONE_HALF_WIDTH = 7  # ±7 trading days around each median event date
+    n_days = len(median_per_day)
+    dip_zone_start = max(0, int(median_date_index) - ZONE_HALF_WIDTH)
+    dip_zone_end = min(n_days - 1, int(median_date_index) + ZONE_HALF_WIDTH)
+    rally_zone_start = max(0, int(rally_date_index) - ZONE_HALF_WIDTH)
+    rally_zone_end = min(n_days - 1, int(rally_date_index) + ZONE_HALF_WIDTH)
 
-    # Running min/max along each path: shape (n_paths, n_days)
-    running_min = np.minimum.accumulate(paths, axis=1)
-    running_max = np.maximum.accumulate(paths, axis=1)
-
-    # Lower band: 30th percentile of running_min (70% of paths have min ≤ this)
-    daily_lower = np.percentile(running_min, 100 - dip_conviction, axis=0)
-    # Upper band: 40th percentile of running_max (60% of paths have max ≥ this)
-    daily_upper = np.percentile(running_max, 100 - rally_conviction, axis=0)
-
-    daily_bands = [
-        {'day': i + 1, 'lower': float(daily_lower[i]), 'upper': float(daily_upper[i])}
-        for i in range(len(daily_lower))
-    ]
+    daily_bands = []
+    for i in range(n_days):
+        zone = ''
+        if rally_zone_start <= i <= rally_zone_end:
+            zone = 'rally'
+        if dip_zone_start <= i <= dip_zone_end:
+            zone = 'dip'  # dip takes precedence if overlap (rare)
+        daily_bands.append({
+            'day': i + 1,
+            'median_price': float(median_per_day[i]),
+            'zone': zone,
+        })
 
     return {
         'percentile_low': percentile_low,

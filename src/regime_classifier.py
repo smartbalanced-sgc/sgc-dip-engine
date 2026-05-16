@@ -283,31 +283,53 @@ def _ai_disambiguate_regime(ticker, stock_data, rule_result, client, cost_tracke
     max_tokens = get_config('regime_classifier', 'ai_research', 'max_tokens',
                             default=600)
     
-    prompt = f"""Research {company_name} ({ticker}, {sector}) for trade regime classification.
+    today_str = datetime.now().strftime('%Y-%m-%d')
 
-CURRENT SIGNALS:
+    # §2026-05-15 regime AI prompt upgrade — same skepticism pattern as
+    # sentiment.py emergency search: explicit source-quality rules,
+    # multi-source confirmation, dated short-interest verification,
+    # defined regime criteria. Reduces SQUEEZE/MOMENTUM mis-labels from
+    # single-source rumours or stale short-interest data.
+    prompt = f"""Disambiguate the trade regime for {company_name} ({ticker}, {sector}) as of {today_str}.
+Rule-based classifier flagged this as {rule_result['regime']}.
+
+STOCK METRICS FOR CONTEXT:
 - RSI: {rsi_str}
-- 5-day price move: {mom_5d*100:+.1f}%
+- 5-day move: {mom_5d*100:+.1f}%
 - Sector decoupling: {decoup*100:+.1f}pp (vs {sector})
 - Relative volume: {rel_vol:.1f}x normal
 
-The rule-based classifier flagged this as {rule_result['regime']}. I need to know if this is:
-A) MOMENTUM — sustainable trend with real fundamentals
-B) SQUEEZE_RISK — forced rally driven by shorts covering, will reverse
+SEARCH PRIORITIES (in order):
+1. Short interest from last 14 days (FINRA / exchange data, % of float)
+2. Recent insider transactions (Form 4 filings, last 30 days)
+3. Analyst rating changes (last 14 days, major outlets)
+4. Material news catalysts (last 14 days)
+5. Broader sector context (sector ETF performance over same period)
 
-Search the web for:
-1. Recent short interest data for {ticker} (% of float, days to cover)
-2. Insider transactions in last 30 days
-3. Analyst rating changes in last 14 days
-4. Material news catalysts driving recent price action
-5. Whether the sector is also rallying or {ticker} is decoupled
+SKEPTICISM RULES:
+- Require >= 2 independent reputable sources for any thesis-affecting claim
+- PRIMARY (SEC filings, exchange data, official announcements)
+  > REPUTABLE (Reuters, Bloomberg, WSJ, FT, CNBC)
+  > SPECULATIVE (blogs, social media, single-source rumours)
+- If short interest data is older than 14 days, mark "stale" in REASONING
+- If the broader sector is also rallying with this stock, lean
+  NORMAL or MOMENTUM (not SQUEEZE_RISK)
 
-Answer in EXACTLY this format (5 lines):
+REGIME CRITERIA:
+- MOMENTUM: real fundamental drivers (earnings beat, product launch,
+  analyst upgrades, sector tailwind) AND short interest is LOW (< 5%).
+- SQUEEZE_RISK: short interest > 10% AND no fundamental catalyst AND
+  unusual options/social activity. Forced rally, likely to reverse.
+- NORMAL: the move is ordinary (within typical volatility, sector-driven,
+  or technically explained without thesis impact).
+
+OUTPUT EXACTLY (6 lines):
 REGIME: MOMENTUM / SQUEEZE_RISK / NORMAL
-CONFIDENCE: 0.0 to 1.0
-SHORT_INTEREST: [% of float if found, else "not found"]
-REASONING: [max 150 chars citing specific findings]
-SOURCES: [comma-separated source names]"""
+CONFIDENCE: HIGH / MEDIUM / LOW
+SHORT_INTEREST: [% of float if found within last 14 days, else "not found" or "stale"]
+SOURCE_QUALITY: PRIMARY / REPUTABLE / SPECULATIVE / NONE_FOUND
+SOURCES_COUNT: <integer — distinct credible sources>
+REASONING: [max 200 chars — cite top source by name]"""
 
     try:
         response = client.messages.create(
@@ -351,8 +373,14 @@ SOURCES: [comma-separated source names]"""
 
 
 def _parse_ai_regime_response(text):
-    """Parse Claude's structured regime response."""
+    """Parse Claude's structured regime response.
+    §2026-05-15 upgraded format adds SOURCE_QUALITY + SOURCES_COUNT and uses
+    categorical CONFIDENCE (HIGH/MEDIUM/LOW). Legacy numeric CONFIDENCE still
+    accepted for backward-compat."""
+    import re
     result = {}
+    confidence_word_map = {'HIGH': 0.85, 'MEDIUM': 0.65, 'LOW': 0.45}
+
     for line in text.split('\n'):
         line = line.strip()
         if line.startswith('REGIME:'):
@@ -362,24 +390,50 @@ def _parse_ai_regime_response(text):
                     result['regime'] = r
                     break
         elif line.startswith('CONFIDENCE:'):
-            try:
-                val = line.split('CONFIDENCE:', 1)[1].strip()
-                # Extract first float
-                import re
+            val = line.split('CONFIDENCE:', 1)[1].strip().upper()
+            # New format: HIGH / MEDIUM / LOW
+            mapped = next((confidence_word_map[w] for w in confidence_word_map if w in val), None)
+            if mapped is not None:
+                result['confidence'] = mapped
+            else:
+                # Legacy numeric fallback
                 m = re.search(r'(\d+\.?\d*)', val)
                 if m:
                     conf = float(m.group(1))
                     if conf > 1.0:
-                        conf = conf / 100.0  # In case AI returns percentage
+                        conf = conf / 100.0
                     result['confidence'] = min(max(conf, 0.0), 1.0)
-            except Exception:
-                pass
         elif line.startswith('SHORT_INTEREST:'):
             result['short_interest'] = line.split('SHORT_INTEREST:', 1)[1].strip()[:60]
+        elif line.startswith('SOURCE_QUALITY:'):
+            val = line.split('SOURCE_QUALITY:', 1)[1].strip().upper()
+            if val in ('PRIMARY', 'REPUTABLE', 'SPECULATIVE', 'NONE_FOUND'):
+                result['source_quality'] = val
+        elif line.startswith('SOURCES_COUNT:'):
+            try:
+                result['sources_count'] = int(
+                    ''.join(c for c in line.split(':', 1)[1] if c.isdigit()) or '0'
+                )
+            except Exception:
+                result['sources_count'] = 0
         elif line.startswith('REASONING:'):
             result['reasoning'] = line.split('REASONING:', 1)[1].strip()[:200]
         elif line.startswith('SOURCES:'):
+            # Legacy field — keep for backward-compat with older cached entries
             result['sources'] = line.split('SOURCES:', 1)[1].strip()[:200]
+
+    # §2026-05-15 quality gate: SPECULATIVE source single-handedly cannot upgrade
+    # the regime label. If AI says SQUEEZE_RISK from one speculative source, fall
+    # back to MOMENTUM (less drastic). NONE_FOUND can't override at all.
+    if result.get('source_quality') == 'NONE_FOUND':
+        # AI failed to find anything credible; trust the rule-based result
+        result.pop('regime', None)
+        result.pop('confidence', None)
+    elif (result.get('source_quality') == 'SPECULATIVE'
+          and result.get('sources_count', 0) < 2
+          and result.get('regime') == 'SQUEEZE_RISK'):
+        result['regime'] = 'MOMENTUM'
+
     return result
 
 
