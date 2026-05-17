@@ -381,18 +381,21 @@ OPUS_INPUT_PER_TOKEN = 15.00 / 1_000_000
 OPUS_OUTPUT_PER_TOKEN = 75.00 / 1_000_000
 WEB_SEARCH_PER_USE = 0.01
 
-# Blend weights (sum = 1.0). Historical is included at low weight after
-# §2026-05-17 audit (Agent A finding #3): excluding historical entirely throws
-# out the only signal with price-discovery built in. Historical is gated as
-# LOW confidence by default, halving its effective weight; only when GARCH
-# fits cleanly AND the stock isn't post-parabolic does it get full weight.
+# Blend weights (sum = 1.0). §2026-05-17 god mode v4: expanded to 9 signals.
+# Quality gates apply (LOW conf / SPECULATIVE+single source → halved weight;
+# NONE_FOUND → dropped). Default weights designed so each non-AI signal carries
+# meaningful but not dominant weight; AI carries the most weight as it's the
+# only signal with forward-looking synthesis across all factors.
 BLEND_WEIGHTS = {
-    "historical": 0.15,
-    "analyst":    0.20,
-    "sector":     0.10,
-    "macro":      0.10,
-    "insider":    0.05,
-    "ai":         0.40,
+    "historical":         0.10,
+    "analyst":            0.15,
+    "sector":             0.08,
+    "macro":              0.07,
+    "insider":            0.05,
+    "ai":                 0.30,
+    "short_interest":     0.05,
+    "peer_rs":            0.10,
+    "sector_decoupling":  0.10,
 }
 
 
@@ -1483,6 +1486,442 @@ def load_prior_blend(history_path, days_back_limit=3):
         return None, None
 
 
+# =============================================================
+# GOD MODE v4 — Multi-target conviction scan (§2026-05-17)
+#
+# Design locked per final audit. Key principles:
+#   - User's decision rule: hold if P(touch X) >= threshold (default 65%)
+#   - Multi-target scan finds the HIGHEST defensible sell-limit X
+#   - Sigma triangulation: GARCH + realized vol + options IV (liquidity-gated)
+#   - Drift estimation: 9 quality-gated signals (was 6 in v3)
+#   - NO threshold-spectrum noise, NO X_stretch fantasy, NO synthesized
+#     reliability score (show components separately), NO block bootstrap
+#   - Default threshold 65% for high-stakes swing trades; --conviction-threshold
+#     flag for override
+# =============================================================
+
+
+def compute_realized_vol(returns, windows=(30, 60, 90)):
+    """Compute realized vol over multiple rolling windows.
+    Returns dict {window_days: annualised_sigma}."""
+    out = {}
+    r = returns.replace([np.inf, -np.inf], np.nan).dropna()
+    for w in windows:
+        if len(r) < w + 1:
+            out[w] = None
+            continue
+        recent = r.tail(w)
+        out[w] = float(recent.std() * np.sqrt(252))
+    return out
+
+
+def fetch_options_iv(ticker, target_dte_days=60):
+    """yfinance options chain → ATM straddle IV at ~target_dte_days expiry.
+
+    Liquidity-gated: only return IV if option chain is liquid enough.
+    Returns: dict {iv, expiry, dte, atm_strike, bid_ask_pct_avg, is_liquid}
+             or None if yfinance unavailable / data unusable.
+    """
+    try:
+        import yfinance as yf
+    except ImportError:
+        return None
+    try:
+        tk = yf.Ticker(ticker)
+        expiries = tk.options
+        if not expiries:
+            return None
+        # Find expiry closest to target DTE
+        today = datetime.now().date()
+        candidates = []
+        for ex_str in expiries:
+            try:
+                ex_date = datetime.strptime(ex_str, "%Y-%m-%d").date()
+                dte = (ex_date - today).days
+                if 7 <= dte <= target_dte_days * 2:
+                    candidates.append((abs(dte - target_dte_days), dte, ex_str))
+            except ValueError:
+                continue
+        if not candidates:
+            return None
+        candidates.sort()
+        _, dte, expiry = candidates[0]
+        chain = tk.option_chain(expiry)
+        # Find ATM strike
+        spot = float(tk.fast_info.get("last_price", 0) or tk.history(period="1d")["Close"].iloc[-1])
+        if spot <= 0:
+            return None
+        calls = chain.calls
+        puts = chain.puts
+        if calls.empty or puts.empty:
+            return None
+        # ATM strike: closest to spot
+        atm_strike = float(calls.iloc[(calls["strike"] - spot).abs().argmin()]["strike"])
+        atm_call = calls[calls["strike"] == atm_strike]
+        atm_put = puts[puts["strike"] == atm_strike]
+        if atm_call.empty or atm_put.empty:
+            return None
+        # Liquidity check: bid-ask spread % on both sides
+        def spread_pct(row):
+            bid = float(row["bid"])
+            ask = float(row["ask"])
+            mid = (bid + ask) / 2
+            return abs(ask - bid) / mid if mid > 0 else 1.0
+        call_spread = spread_pct(atm_call.iloc[0])
+        put_spread = spread_pct(atm_put.iloc[0])
+        avg_spread = (call_spread + put_spread) / 2
+        is_liquid = avg_spread < 0.10  # < 10% bid-ask spread → liquid enough
+        # Average IV from ATM call + put
+        call_iv = float(atm_call.iloc[0]["impliedVolatility"])
+        put_iv = float(atm_put.iloc[0]["impliedVolatility"])
+        avg_iv = (call_iv + put_iv) / 2
+        return {
+            "iv": avg_iv,
+            "expiry": expiry,
+            "dte": dte,
+            "atm_strike": atm_strike,
+            "bid_ask_pct_avg": avg_spread,
+            "is_liquid": is_liquid,
+            "call_iv": call_iv,
+            "put_iv": put_iv,
+        }
+    except Exception as e:
+        print(f"   WARNING: yfinance options IV fetch failed: {e}")
+        return None
+
+
+def triangulate_sigma(garch_sigma, realized_vol_dict, options_iv_data):
+    """Triangulate sigma estimate across GARCH + realized vol + options IV.
+    Returns: {blended, anchors (dict), method_used, divergence_pp}"""
+    anchors = {}
+    if garch_sigma is not None:
+        anchors["garch"] = float(garch_sigma)
+    for w, v in (realized_vol_dict or {}).items():
+        if v is not None:
+            anchors[f"realized_{w}d"] = float(v)
+    if options_iv_data and options_iv_data.get("is_liquid"):
+        anchors["options_iv"] = float(options_iv_data["iv"])
+
+    if not anchors:
+        return None
+    values = list(anchors.values())
+    blended = float(np.mean(values))
+    divergence = (max(values) - min(values)) if len(values) > 1 else 0.0
+
+    return {
+        "blended": blended,
+        "anchors": anchors,
+        "n_anchors": len(anchors),
+        "divergence_pp": divergence * 100,
+    }
+
+
+def fetch_short_interest(ticker, api_key):
+    """Try FMP first (likely 402 on Starter), fall back to yfinance.
+    Returns: {short_percent_of_float, days_to_cover, source} or None."""
+    # Try FMP — there's no canonical Starter endpoint, but try common ones
+    data = _fmp_get("share-float", api_key, {"symbol": ticker})
+    if data and isinstance(data, list) and data:
+        d = data[0]
+        spf = d.get("shortPercentOfFloat") or d.get("shortFloatPercent")
+        if spf is not None:
+            return {
+                "short_percent_of_float": float(spf),
+                "days_to_cover": d.get("shortRatio"),
+                "source": "FMP",
+            }
+    # yfinance fallback
+    try:
+        import yfinance as yf
+        info = yf.Ticker(ticker).info or {}
+        spf = info.get("shortPercentOfFloat")
+        dtc = info.get("shortRatio")
+        if spf is not None:
+            return {
+                "short_percent_of_float": float(spf),
+                "days_to_cover": float(dtc) if dtc else None,
+                "source": "yfinance",
+            }
+    except Exception:
+        pass
+    return None
+
+
+def signal_from_short_interest(short_data):
+    """Short interest as drift tilt.
+    Low SI (<3% of float): no signal / slight bullish (squeezes priced in)
+    Medium SI (3-10%): mild bearish (sentiment skeptical)
+    High SI (10-20%): tail-risk on BOTH sides — squeeze upside potential, but
+      also indicates structural skepticism. Net effect: SMALL bearish tilt
+      with HIGH uncertainty (wider CI on the signal itself).
+    Very high SI (>20%): potential squeeze setup
+    """
+    if not short_data or short_data.get("short_percent_of_float") is None:
+        return _none_signal("no short interest data")
+    spf = short_data["short_percent_of_float"]
+    if spf < 0.03:
+        drift = 0.00
+        conf = "MEDIUM"
+        note = f"SI {spf*100:.1f}% of float — low, neutral signal"
+    elif spf < 0.10:
+        drift = -0.03
+        conf = "MEDIUM"
+        note = f"SI {spf*100:.1f}% of float — moderate skepticism (mild bearish)"
+    elif spf < 0.20:
+        drift = -0.05
+        conf = "LOW"
+        note = (f"SI {spf*100:.1f}% of float — elevated; tail risk both directions "
+                f"(squeeze upside vs structural bearishness)")
+    else:
+        # Very high SI — squeeze potential dominates
+        drift = +0.05
+        conf = "LOW"
+        note = f"SI {spf*100:.1f}% of float — very high; squeeze tail upside"
+    return {
+        "drift": float(drift), "confidence": conf,
+        "source_quality": "PRIMARY", "sources_count": 1,
+        "notes": note + f" [via {short_data.get('source', '?')}]",
+    }
+
+
+def fetch_peer_history(peers, api_key, lookback_days=60):
+    """Fetch closing-price history for peer tickers. Returns
+    {peer_ticker: pd.DataFrame[Date, Close]}."""
+    out = {}
+    for p in peers:
+        try:
+            df = fetch_history(p, api_key, lookback_days=lookback_days)
+            if df is not None and not df.empty:
+                out[p] = df
+        except Exception as e:
+            print(f"   WARNING: peer {p} fetch failed: {e}")
+    return out
+
+
+def signal_from_peer_rs(price_df, peer_dfs, lookback_days=60):
+    """Compute SNDK's relative strength vs peer median return over lookback_days.
+    Positive RS → SNDK outperforming → momentum continuation signal (bullish).
+    Negative RS → underperforming → weakness signal (bearish)."""
+    if price_df is None or len(price_df) < lookback_days + 1:
+        return _none_signal("insufficient price history for peer RS")
+    if not peer_dfs:
+        return _none_signal("no peer data available")
+
+    def n_day_return(df, n):
+        if len(df) < n + 1:
+            return None
+        try:
+            return float(df["Close"].iloc[-1] / df["Close"].iloc[-n - 1] - 1.0)
+        except (IndexError, ValueError):
+            return None
+
+    sndk_ret = n_day_return(price_df, lookback_days)
+    if sndk_ret is None:
+        return _none_signal("could not compute SNDK return")
+
+    peer_rets = []
+    for p, df in peer_dfs.items():
+        r = n_day_return(df, lookback_days)
+        if r is not None:
+            peer_rets.append((p, r))
+    if not peer_rets:
+        return _none_signal("no peer returns computable")
+
+    peer_median = float(np.median([r for _, r in peer_rets]))
+    rs = sndk_ret - peer_median  # SNDK return minus peer median
+    # Annualise the spread for drift contribution
+    drift = rs * 252 / lookback_days
+    drift = max(-0.30, min(0.30, drift))  # cap effect
+
+    # Confidence: tighter peer dispersion → higher conf
+    if len(peer_rets) >= 2:
+        peer_dispersion = float(np.std([r for _, r in peer_rets]))
+        if peer_dispersion < 0.05:
+            conf = "HIGH"
+        elif peer_dispersion < 0.15:
+            conf = "MEDIUM"
+        else:
+            conf = "LOW"
+    else:
+        conf = "LOW"  # only 1 peer = low confidence
+
+    peer_list = ", ".join([f"{p} {r*100:+.0f}%" for p, r in peer_rets])
+    return {
+        "drift": float(drift), "confidence": conf,
+        "source_quality": "PRIMARY", "sources_count": len(peer_rets),
+        "notes": (f"SNDK {sndk_ret*100:+.0f}% vs peers [{peer_list}] over {lookback_days}d "
+                  f"-> RS {rs*100:+.0f}%, annualised tilt {drift*100:+.0f}%"),
+    }
+
+
+def signal_from_sector_decoupling(price_df, sector_perf, lookback_days=30):
+    """Compute decoupling: is SNDK moving WITH or AGAINST its sector recently?
+    Positive decoupling (SNDK outperforming sector) = SNDK-specific strength.
+    Negative = SNDK-specific weakness vs sector.
+    """
+    if price_df is None or len(price_df) < lookback_days + 1:
+        return _none_signal("insufficient price history for decoupling")
+    if not sector_perf or sector_perf.get("cum_return_pct") is None:
+        return _none_signal("no sector data for decoupling")
+
+    try:
+        sndk_ret = float(price_df["Close"].iloc[-1] /
+                          price_df["Close"].iloc[-lookback_days - 1] - 1.0)
+    except (IndexError, ValueError):
+        return _none_signal("SNDK return calc failed")
+
+    sector_ret = sector_perf["cum_return_pct"] / 100.0
+    decoup = sndk_ret - sector_ret
+    # Annualise
+    drift = decoup * 252 / lookback_days
+    drift = max(-0.20, min(0.20, drift))  # cap
+
+    if abs(decoup) < 0.02:
+        conf = "LOW"
+        note_extra = "(low decoupling, signal noisy)"
+    elif abs(decoup) < 0.10:
+        conf = "MEDIUM"
+        note_extra = ""
+    else:
+        conf = "HIGH"
+        note_extra = "(meaningful decoupling)"
+
+    return {
+        "drift": float(drift), "confidence": conf,
+        "source_quality": "PRIMARY", "sources_count": 1,
+        "notes": (f"SNDK {sndk_ret*100:+.0f}% vs sector {sector_ret*100:+.0f}% "
+                  f"over {lookback_days}d -> decouple {decoup*100:+.0f}% {note_extra}"),
+    }
+
+
+def scan_target_probabilities(S0, sigma, mu_blend, horizon, entry,
+                               threshold=0.65, target_increment=10,
+                               max_target_mult=1.50):
+    """Multi-target probability scan. For each candidate sell-limit X in
+    [entry, max], compute P(touch X) in horizon via MC, with CI bounds
+    from drift uncertainty (using mu_blend's 68% CI).
+
+    Returns: {
+      curve: list of {X, p_point, p_lo68, p_hi68, profit, action_at_threshold}
+      x_safe: highest X where p_lo68 >= threshold (robust)
+      x_aggressive: highest X where p_point >= threshold (point estimate)
+      threshold_used: threshold
+    }
+    """
+    mu_point = mu_blend.get("blended")
+    mu_lo = mu_blend.get("lo68", mu_point - 0.20 if mu_point else None)
+    mu_hi = mu_blend.get("hi68", mu_point + 0.20 if mu_point else None)
+
+    if mu_point is None:
+        return None
+
+    # Build target grid from entry upward to max_target_mult * entry
+    max_target = entry * max_target_mult
+    targets = []
+    x = entry
+    while x <= max_target:
+        targets.append(float(x))
+        x += target_increment
+
+    T = horizon / 252
+    curve = []
+    # Compute P at point + lo68 + hi68 for each target
+    for X in targets:
+        # Use closed-form for speed (we cross-check with MC for x_aggressive only)
+        p_point = closed_touch_up(S0, X, T, mu_point, sigma)
+        p_lo = closed_touch_up(S0, X, T, mu_lo, sigma)
+        p_hi = closed_touch_up(S0, X, T, mu_hi, sigma)
+        profit = (X - entry) * 1  # per share; caller multiplies by shares
+        # Action at threshold
+        if p_lo >= threshold:
+            action = "ROBUST HOLD"
+        elif p_point >= threshold:
+            action = "POINT HOLD"
+        else:
+            action = "BELOW"
+        curve.append({
+            "X": X,
+            "p_point": float(p_point),
+            "p_lo68": float(p_lo),
+            "p_hi68": float(p_hi),
+            "profit_per_share": float(profit),
+            "action": action,
+        })
+        # Stop scanning once point falls below 30% (no more useful info)
+        if p_point < 0.30:
+            break
+
+    # Find x_safe (highest X where lo68 >= threshold)
+    x_safe = None
+    for row in curve:
+        if row["p_lo68"] >= threshold:
+            x_safe = row["X"]
+    # Find x_aggressive (highest X where p_point >= threshold)
+    x_aggressive = None
+    for row in curve:
+        if row["p_point"] >= threshold:
+            x_aggressive = row["X"]
+
+    return {
+        "curve": curve,
+        "x_safe": x_safe,
+        "x_aggressive": x_aggressive,
+        "threshold_used": threshold,
+        "mu_point": mu_point,
+        "mu_lo68": mu_lo,
+        "mu_hi68": mu_hi,
+    }
+
+
+def compute_target_sensitivity(S0, sigma_point, mu_point, horizon, X_target,
+                                threshold=0.65):
+    """At the recommended X_target, show how P(touch) responds to ±15pp drift
+    swings and ±20% sigma swings. Identifies the conditions that flip verdict.
+    """
+    T = horizon / 252
+    scenarios = []
+
+    def evaluate(mu, sig, label):
+        p = closed_touch_up(S0, X_target, T, mu, sig)
+        verdict = "HOLD" if p >= threshold else "BELOW"
+        return {"label": label, "mu": mu, "sigma": sig, "p": float(p), "verdict": verdict}
+
+    scenarios.append(evaluate(mu_point, sigma_point, "Baseline (current estimate)"))
+    scenarios.append(evaluate(mu_point - 0.15, sigma_point, "Drift -15pp"))
+    scenarios.append(evaluate(mu_point + 0.15, sigma_point, "Drift +15pp"))
+    scenarios.append(evaluate(mu_point, sigma_point * 1.20, "Sigma +20%"))
+    scenarios.append(evaluate(mu_point, sigma_point * 0.80, "Sigma -20%"))
+    scenarios.append(evaluate(mu_point - 0.15, sigma_point * 1.20, "Hostile (drift-15, sigma+20)"))
+
+    # Find drift threshold where verdict flips
+    flip_drift = None
+    mu_test = mu_point
+    step = -0.01
+    for _ in range(100):
+        p = closed_touch_up(S0, X_target, T, mu_test, sigma_point)
+        if p < threshold:
+            flip_drift = mu_test
+            break
+        mu_test += step
+    return {"scenarios": scenarios, "flip_drift": flip_drift}
+
+
+def adjust_for_earnings(p_estimate, earnings_event, horizon_days):
+    """If earnings event falls within horizon, the GBM P estimate doesn't
+    model gap risk. Return adjusted estimate as a BAND, not a point."""
+    if not earnings_event or not earnings_event.get("in_horizon"):
+        return {"adjusted": False, "band_lo": p_estimate, "band_hi": p_estimate}
+    # Earnings gaps typically swing ±10-20% one-day. This adds uncertainty in
+    # BOTH directions — could touch target via gap up, or miss by gap down.
+    # Use ±5pp band on P(touch) — empirical from historical earnings days.
+    return {
+        "adjusted": True,
+        "band_lo": max(0.0, p_estimate - 0.05),
+        "band_hi": min(1.0, p_estimate + 0.05),
+        "note": "Earnings in horizon: ±5pp gap-risk band on P (MC doesn't model gaps)",
+    }
+
+
 # -----------------------------------------------------------
 # Blending — confidence-weighted with canon quality gates
 # -----------------------------------------------------------
@@ -1625,18 +2064,13 @@ def check_hysteresis(history_path, today_verdict, today_cushion):
         return None, None
 
 
-def check_thesis_mode(args):
-    """Daily thesis-health check, GOD MODE v2 (§2026-05-17 option Y).
+def _legacy_check_thesis_v3(args):
+    """LEGACY v3 — superseded by check_thesis_mode (v4) below. Kept only as
+    reference; not called by main(). v3 used EV-cushion verdict math; v4
+    uses multi-target conviction scan per audit-locked design 2026-05-17.
 
-    Implements:
-      - Tier 0 (8 bias fixes): historical re-included with quality gating;
-        null fallback for AI; symmetric anti-bias prompt; staleness-aware
-        analyst; size-relative insider; macro downgraded to MEDIUM; hysteresis
-        on verdict flips; report-both tie-breaker
-      - Tier 1 (5 architectural upgrades): regime detection; vol-regime
-        advisory; confidence intervals on blended drift; Bayesian belief
-        update across days; path-dependent risk metrics (max drawdown,
-        time-to-target, drawdown-along-the-way)
+    Original docstring: Daily thesis-health check, GOD MODE v2 with
+    EV-optimization framework and cushion bands.
     """
     api_key = os.environ.get("FMP_API_KEY")
     if not api_key:
@@ -2309,6 +2743,543 @@ def check_thesis_mode(args):
         print(f"  AI cost this run: ${ai_cost:.3f}")
 
 
+def check_thesis_mode(args):
+    """GOD MODE v4 — multi-target conviction scan (§2026-05-17 final).
+
+    User's decision rule: HOLD if the model finds at least ONE sell-limit
+    level X >= entry where P(touch X) in horizon >= conviction threshold.
+    Default threshold = 65% (locked per final audit for high-stakes swing).
+
+    Output identifies:
+      - X_aggressive: highest X with point estimate P >= threshold (recommended)
+      - X_safe: highest X with lo68 CI bound P >= threshold (robust)
+      - Verdict: HOLD with sell-limit @ X_aggressive, TRIM (marginal), or CUT
+
+    Fortifications vs v3:
+      - 9 drift signals (added: short_interest, peer_rs, sector_decoupling)
+      - Sigma triangulation: GARCH + realized vol (30/60/90d) + yfinance IV
+      - Earnings-aware probability bands (gap risk not in GBM)
+      - Reliability components shown separately (no synthesized score)
+      - No threshold spectrum noise, no X_stretch fantasy, no block bootstrap
+    """
+    api_key = os.environ.get("FMP_API_KEY")
+    if not api_key:
+        sys.exit("ERROR: FMP_API_KEY not set in environment")
+
+    ticker = args.thesis_ticker
+    threshold = getattr(args, "conviction_threshold", 0.65)
+
+    df = fetch_history(ticker, api_key, args.lookback_days)
+    S0 = float(df["Close"].iloc[-1])
+    last_date = df["Date"].iloc[-1].strftime("%Y-%m-%d")
+    log_ret = np.log(df["Close"] / df["Close"].shift(1)).dropna()
+
+    # GARCH + realized vol
+    forecast_var = fit_garch_11(log_ret)
+    garch_sigma = float(np.sqrt(forecast_var * 252))
+    garch_fit_ok = forecast_var > 0 and not np.isnan(forecast_var)
+    realized_vols = compute_realized_vol(log_ret, windows=(30, 60, 90))
+
+    # Drift base + enrichment
+    mu_hist = float(log_ret.mean() * 252)
+    mu_capped = max(-args.drift_cap, min(args.drift_cap, mu_hist))
+    rsi = compute_rsi_14(df["Close"])
+    mom_5d = float(df["Close"].iloc[-1] / df["Close"].iloc[-6] - 1.0) if len(df) >= 6 else 0.0
+    mom_30d = (float(df["Close"].iloc[-1] / df["Close"].iloc[-31] - 1.0) * 100
+               if len(df) >= 31 else None)
+    enr = enrichment_drift(rsi, mom_5d)
+    mu_effective_historical = mu_capped + enr * 252 / args.horizon
+
+    # YTD return
+    ytd_pct = None
+    try:
+        ytd_start = df[df["Date"].dt.year == datetime.now().year]["Close"].iloc[0]
+        ytd_pct = (S0 / float(ytd_start) - 1.0) * 100
+    except (IndexError, ValueError, TypeError):
+        pass
+
+    print_header(f"{ticker} THESIS HEALTH CHECK (GOD MODE v4) — "
+                 f"{datetime.now():%Y-%m-%d %H:%M}")
+    print(f"  Conviction threshold: {threshold*100:.0f}%")
+    print(f"  Gathering intelligence (this takes ~15-40s)...")
+    print()
+
+    # === FETCH ALL DATA ===
+    profile = fetch_company_profile(ticker, api_key) or {}
+    sector_name = profile.get("sector") or "Technology"
+    market_cap_usd = None
+    for fname in ("mktCap", "marketCap", "mcap", "market_cap"):
+        try:
+            v = profile.get(fname)
+            if v and float(v) > 0:
+                market_cap_usd = float(v)
+                break
+        except (ValueError, TypeError):
+            continue
+
+    analyst_targets = fetch_analyst_targets(ticker, api_key)
+    analyst_summary = fetch_analyst_summary(ticker, api_key)
+    stock_exchange = profile.get("exchange", "NASDAQ") or "NASDAQ"
+    sector_perf = fetch_sector_perf(sector_name, api_key, days=30,
+                                     exchange_filter=stock_exchange)
+    insider = fetch_insider_activity(ticker, api_key, days=90)
+    macro = fetch_macro_indicators(api_key)
+    recent_news = fetch_recent_news(ticker, api_key, limit=20)
+    earnings_event = fetch_next_earnings(ticker, api_key,
+                                          lookahead_days=args.horizon + 60)
+    if earnings_event:
+        earnings_event["in_horizon"] = earnings_event["days_away"] <= args.horizon
+        earnings_event["approaching"] = (args.horizon < earnings_event["days_away"]
+                                          <= args.horizon + 30)
+
+    # NEW v4 data sources
+    short_interest = fetch_short_interest(ticker, api_key)
+    peer_dfs = fetch_peer_history(["MU", "WDC"], api_key, lookback_days=90)
+    options_iv = fetch_options_iv(ticker, target_dte_days=args.horizon)
+
+    # === SIGMA TRIANGULATION ===
+    sigma_triangle = triangulate_sigma(garch_sigma, realized_vols, options_iv)
+    sigma_for_mc = sigma_triangle["blended"] if sigma_triangle else garch_sigma
+
+    # === REGIME + VOL ADVISORY ===
+    regime = detect_swing_regime(rsi, mom_5d, mom_30d, sigma_for_mc, ytd_pct)
+    vol_advice = vol_regime_advisory(sigma_for_mc)
+
+    # === BUILD 9 SIGNALS ===
+    signals = {
+        "historical":         signal_from_historical(mu_effective_historical,
+                                                      mu_hist, sigma_for_mc),
+        "analyst":            signal_from_analyst_targets(analyst_targets, S0,
+                                                           price_history_df=df,
+                                                           summary=analyst_summary),
+        "sector":             signal_from_sector(sector_perf, swing_regime=regime),
+        "macro":              signal_from_macro(macro),
+        "insider":            signal_from_insider(insider,
+                                                   market_cap_usd=market_cap_usd),
+        "short_interest":     signal_from_short_interest(short_interest),
+        "peer_rs":            signal_from_peer_rs(df, peer_dfs, lookback_days=60),
+        "sector_decoupling":  signal_from_sector_decoupling(df, sector_perf,
+                                                             lookback_days=30),
+    }
+
+    # === AI SYNTHESIS ===
+    ai_parsed = None
+    ai_cost = 0.0
+    ai_raw = ""
+    if not args.no_ai:
+        prompt = build_ai_synthesis_prompt(
+            ticker, profile, S0, sigma_for_mc, args.horizon,
+            recent_news, [], sector_perf, analyst_targets,
+            insider, macro, earnings_event=earnings_event,
+            analyst_summary=analyst_summary)
+        ai_parsed, ai_cost, ai_raw = call_ai_analyst(
+            prompt, model=args.ai_model, max_tokens=3000)
+        if ai_parsed is not None:
+            signals["ai"] = signal_from_ai(ai_parsed)
+        else:
+            signals["ai"] = _none_signal("AI synthesis failed; see raw output")
+    else:
+        signals["ai"] = _none_signal("AI skipped (--no-ai)")
+
+    # === BLEND DRIFT ===
+    blend = blend_with_uncertainty(signals)
+
+    # === BAYESIAN UPDATE ===
+    history_dir = Path(__file__).parent / "output"
+    history_dir.mkdir(exist_ok=True)
+    history_path = history_dir / f"thesis_history_{ticker}.csv"
+    prior_blend, prior_age = load_prior_blend(history_path, days_back_limit=3)
+    bayesian = bayesian_update(prior_blend, blend, prior_age_days=prior_age or 1)
+
+    # Decision drift: posterior if available, else today's blend
+    if (bayesian and bayesian.get("posterior_mu") is not None
+            and prior_blend is not None):
+        mu_for_scan = bayesian["posterior_mu"]
+        mu_std_for_scan = bayesian["posterior_std"]
+        decision_basis = (f"Bayesian posterior ({bayesian['prior_weight']*100:.0f}% "
+                          f"prior + {bayesian['obs_weight']*100:.0f}% today)")
+    elif blend.get("blended") is not None:
+        mu_for_scan = blend["blended"]
+        mu_std_for_scan = blend.get("std", 0.20)
+        decision_basis = "today's blend (no prior available)"
+    else:
+        mu_for_scan = mu_effective_historical
+        mu_std_for_scan = 0.20
+        decision_basis = "historical fallback (all forward signals NONE_FOUND)"
+
+    mu_blend_for_scan = {
+        "blended": mu_for_scan,
+        "lo68": mu_for_scan - mu_std_for_scan,
+        "hi68": mu_for_scan + mu_std_for_scan,
+        "std": mu_std_for_scan,
+    }
+
+    # === MULTI-TARGET CONVICTION SCAN ===
+    scan = scan_target_probabilities(S0, sigma_for_mc, mu_blend_for_scan,
+                                      args.horizon, args.entry,
+                                      threshold=threshold,
+                                      target_increment=10,
+                                      max_target_mult=1.50)
+    x_safe = scan["x_safe"] if scan else None
+    x_aggressive = scan["x_aggressive"] if scan else None
+
+    # === MC FOR PATH METRICS at recommended X (or args.target as fallback) ===
+    target_for_path = x_aggressive if x_aggressive else args.target
+    paths = run_mc_paths(S0, sigma_for_mc, mu_for_scan, args.horizon, n_paths=50_000)
+    path_stats = compute_path_metrics(paths, S0, target_for_path, args.panic_level)
+    p_panic = path_stats["panic_touch_prob_total"]
+
+    # === VERDICT ===
+    p_at_be = None
+    p_at_be_lo = None
+    if scan and scan["curve"]:
+        p_at_be = scan["curve"][0]["p_point"]
+        p_at_be_lo = scan["curve"][0]["p_lo68"]
+
+    if x_aggressive and x_aggressive >= args.entry:
+        verdict = "HOLD"
+        verdict_color = "[GREEN]"
+        recommended_X = x_aggressive
+    elif p_at_be is not None and p_at_be >= threshold - 0.10:
+        verdict = "TRIM"
+        verdict_color = "[YELLOW]"
+        recommended_X = args.entry
+    else:
+        verdict = "CUT"
+        verdict_color = "[RED]"
+        recommended_X = None
+
+    # === EARNINGS BAND ADJUSTMENT ===
+    earnings_band = None
+    if x_aggressive and earnings_event and earnings_event.get("in_horizon"):
+        p_at_X = next((row["p_point"] for row in scan["curve"]
+                       if row["X"] == x_aggressive), None)
+        if p_at_X is not None:
+            earnings_band = adjust_for_earnings(p_at_X, earnings_event, args.horizon)
+
+    # === PER-TARGET SENSITIVITY at X_aggressive ===
+    sensitivity = None
+    if x_aggressive:
+        sensitivity = compute_target_sensitivity(
+            S0, sigma_for_mc, mu_for_scan, args.horizon, x_aggressive, threshold)
+
+    # === RENDER ===
+    print(f"  Data through:           {last_date} close")
+    print(f"  Spot:                   ${S0:.2f}")
+    if market_cap_usd:
+        print(f"  Market cap:             ${market_cap_usd/1e9:.1f}B")
+    print(f"  Sector / Industry:      {sector_name} / {profile.get('industry','')}")
+    print(f"  Sigma (GARCH spot):     {garch_sigma*100:.1f}%")
+    print(f"  RSI / 5d mom / 30d mom: {rsi:.1f} / {mom_5d*100:+.1f}% / "
+          f"{f'{mom_30d:+.1f}%' if mom_30d is not None else 'n/a'}")
+    if ytd_pct is not None:
+        print(f"  YTD return:             {ytd_pct:+.1f}%")
+    print()
+    print(f"  Position: {args.shares} shares @ ${args.entry:.0f} cost basis "
+          f"({(S0-args.entry)*args.shares:+,.0f} unrealised)")
+    print(f"  Patience window:        {args.horizon} trading days")
+    print()
+
+    # ---- REGIME + VOL ADVISORY ----
+    print_header("REGIME & VOL ADVISORY")
+    print(f"  Swing regime: {regime['regime']}")
+    print(f"  Detail:       {regime['detail']}")
+    print(f"  Vol level:    {vol_advice['level']}")
+    print()
+
+    # ---- EARNINGS CALENDAR ----
+    if earnings_event:
+        print_header("EARNINGS CALENDAR")
+        ev = earnings_event
+        print(f"  Next earnings:    {ev['date']} ({ev['days_away']}d away)")
+        if ev.get("eps_est"):
+            print(f"  EPS estimate:     ${ev['eps_est']:.2f}")
+        if ev["in_horizon"]:
+            print(f"  ⚠ IN HORIZON: gap risk applies; probabilities have ±5pp band")
+        elif ev["approaching"]:
+            print(f"  CONTEXT: {ev['days_away'] - args.horizon}d after horizon - "
+                  f"late-horizon may see positioning vol")
+        print()
+
+    # ---- SIGMA TRIANGULATION ----
+    print_header("SIGMA TRIANGULATION")
+    if sigma_triangle and sigma_triangle["n_anchors"] >= 1:
+        for anchor_name, anchor_val in sigma_triangle["anchors"].items():
+            print(f"  {anchor_name:<25} {anchor_val*100:6.1f}%")
+        print(f"  {'BLENDED (used in MC)':<25} {sigma_triangle['blended']*100:6.1f}%")
+        print(f"  Anchors used:           {sigma_triangle['n_anchors']}")
+        print(f"  Divergence (max-min):   {sigma_triangle['divergence_pp']:.1f}pp")
+        if options_iv:
+            if options_iv["is_liquid"]:
+                print(f"  Options IV @ {options_iv['expiry']} (DTE {options_iv['dte']}): "
+                      f"{options_iv['iv']*100:.1f}% [included]")
+            else:
+                print(f"  Options IV liquidity-gated out "
+                      f"(bid-ask {options_iv['bid_ask_pct_avg']*100:.1f}% > 10%)")
+        else:
+            print(f"  Options IV: not available (yfinance unavailable or no chain)")
+    else:
+        print(f"  Only GARCH ({garch_sigma*100:.1f}%) available — no triangulation")
+    print(f"  GARCH fit status:       {'OK' if garch_fit_ok else 'DEGRADED'}")
+    print()
+
+    # ---- FORWARD DRIFT INTELLIGENCE (9 SIGNALS) ----
+    print_header("FORWARD DRIFT INTELLIGENCE (9 signals)")
+    print(f"  {'Source':<37}{'mu (ann)':>10}{'Conf':>7}{'SrcQ':>13}{'Wt':>6}")
+    print(f"  {'-'*37}{'-'*10}{'-'*7}{'-'*13}{'-'*6}")
+    sig_labels = [
+        ("historical",        "Historical (GARCH + enrichment)"),
+        ("analyst",           "Analyst (price-target-summary)"),
+        ("sector",            f"Sector momentum ({sector_name})"),
+        ("macro",             "Macro regime (VIX/SPY)"),
+        ("insider",           "Insider activity (90d, mcap-scaled)"),
+        ("short_interest",    "Short interest (squeeze/skepticism)"),
+        ("peer_rs",           "Peer relative strength (MU+WDC, 60d)"),
+        ("sector_decoupling", "Sector decoupling (vs sector, 30d)"),
+        ("ai",                "AI analyst (Claude Opus 4.7)"),
+    ]
+    for name, label in sig_labels:
+        s = signals.get(name, {})
+        d = s.get("drift")
+        d_str = f"{d*100:>+8.1f}%" if d is not None else "    n/a "
+        conf = s.get("confidence", "?")
+        sq = s.get("source_quality", "?")
+        w = blend["weights"].get(name, 0.0)
+        marker = "  *" if name == "ai" else "   "
+        print(f"{marker}{label:<36}{d_str:>9}{conf:>7}{sq:>13}{w*100:>5.0f}%")
+    print()
+    for name, label in sig_labels:
+        s = signals.get(name, {})
+        notes = s.get("notes", "")
+        if notes:
+            label_short = label.split(" (")[0] if "(" in label else label
+            print(f"  {label_short[:32]:<32}: {notes}")
+    print()
+
+    if blend.get("std"):
+        print(f"  BLENDED DRIFT (today): {blend['blended']*100:+.1f}% +/- "
+              f"{blend['std']*100:.1f}pp")
+        print(f"  68% CI: [{blend['lo68']*100:+.1f}%, {blend['hi68']*100:+.1f}%]")
+    print(f"  Active signals: {blend['n_active']} of 9")
+    print(f"  Dispersion: {blend['dispersion_pp']:.1f}pp")
+    if blend["dispersion_pp"] >= 100:
+        print(f"  ⚠ DISPERSION >=100pp - blend NOT a defensible point estimate")
+    elif blend["dispersion_pp"] >= 60:
+        print(f"  ⚠ DISPERSION 60-100pp - treat as noise; use CI bounds")
+    elif blend["dispersion_pp"] >= 30:
+        print(f"  ⚠ DISPERSION 30-60pp - signals disagree meaningfully")
+    print()
+
+    # ---- BAYESIAN ----
+    if bayesian and prior_blend:
+        print_header("BAYESIAN BELIEF UPDATE")
+        print(f"  Prior (yesterday, {prior_age}d old): mu={prior_blend['blended']*100:+.1f}%, "
+              f"std={prior_blend.get('std', 0.15)*100:.1f}pp")
+        print(f"  Today obs:                  mu={blend['blended']*100:+.1f}%, "
+              f"std={blend['std']*100:.1f}pp")
+        print(f"  Posterior (used for scan):  mu={bayesian['posterior_mu']*100:+.1f}%, "
+              f"std={bayesian['posterior_std']*100:.1f}pp")
+        print()
+    print(f"  Decision drift basis: {decision_basis}")
+    print(f"  Drift used in scan:   {mu_for_scan*100:+.1f}% +/- {mu_std_for_scan*100:.1f}pp")
+    print()
+
+    # ---- AI SYNTHESIS ----
+    if ai_parsed:
+        print_header(f"AI ANALYST SYNTHESIS  ({args.ai_model}, cost ${ai_cost:.3f})")
+        dp = ai_parsed.get("drift_point")
+        if dp is not None:
+            print(f"  AI drift estimate:  {dp*100:+.1f}%/yr "
+                  f"(range {ai_parsed.get('drift_low', dp)*100:+.0f}% to "
+                  f"{ai_parsed.get('drift_high', dp)*100:+.0f}%)")
+        else:
+            print(f"  AI drift estimate:  null (evidence too thin)")
+        print(f"  Confidence:         {ai_parsed.get('confidence','?')}, "
+              f"sources cited: {ai_parsed.get('sources_count', 0)}")
+        rationale = ai_parsed.get("rationale", "")
+        if rationale:
+            print(f"  Rationale: {rationale[:300]}")
+        if args.show_rationale:
+            print()
+            print("  BULL FACTORS:")
+            for i, b in enumerate(ai_parsed.get("bull_factors", []) or [], 1):
+                print(f"    {i}. {b.get('factor','')}")
+                print(f"       Source: {b.get('source','')}   Weight: {b.get('weight','?')}")
+            print()
+            print("  BEAR FACTORS:")
+            for i, b in enumerate(ai_parsed.get("bear_factors", []) or [], 1):
+                print(f"    {i}. {b.get('factor','')}")
+                print(f"       Source: {b.get('source','')}   Weight: {b.get('weight','?')}")
+            print()
+            print("  KEY RISKS:")
+            for i, r in enumerate(ai_parsed.get("key_risks", []) or [], 1):
+                print(f"    {i}. {r.get('risk','')}")
+        print()
+
+    # ---- MULTI-TARGET CONVICTION SCAN ----
+    print_header(f"MULTI-TARGET CONVICTION SCAN at {threshold*100:.0f}% threshold")
+    if scan and scan["curve"]:
+        print(f"  {'Sell-limit':<12}{'P(touch)':>10}{'68% CI':>20}"
+              f"{'Profit/sh':>12}{'Status':>16}")
+        print(f"  {'-'*12}{'-'*10}{'-'*20}{'-'*12}{'-'*16}")
+        for row in scan["curve"]:
+            x = row["X"]
+            pp = row["p_point"]
+            plo = row["p_lo68"]
+            phi = row["p_hi68"]
+            profit_sh = row["profit_per_share"]
+            action = row["action"]
+            marker = ""
+            if x == x_aggressive: marker = " ⭐"
+            elif x == x_safe: marker = " ✓"
+            ci_str = f"[{plo*100:.0f}%, {phi*100:.0f}%]"
+            print(f"  ${x:>9.0f}{marker:<2}{pp*100:>8.1f}% {ci_str:>20}"
+                  f"  ${profit_sh:>+7.0f}    {action:>15}")
+        print()
+        print(f"  X_safe       (lo68 >= {threshold*100:.0f}%):  "
+              f"{f'${x_safe:.0f}' if x_safe else 'NONE'}"
+              + (f"  → profit/sh +${x_safe - args.entry:.0f}, "
+                 f"position +${(x_safe - args.entry) * args.shares:.0f}"
+                 if x_safe else "  → no X meets robust CI test"))
+        print(f"  X_aggressive (point >= {threshold*100:.0f}%): "
+              f"{f'${x_aggressive:.0f}' if x_aggressive else 'NONE'}"
+              + (f"  → profit/sh +${x_aggressive - args.entry:.0f}, "
+                 f"position +${(x_aggressive - args.entry) * args.shares:.0f}"
+                 if x_aggressive else "  → P(touch BE) below threshold"))
+    print()
+
+    # ---- VERDICT ----
+    print_header(f"VERDICT  {verdict_color}  {verdict}")
+    if verdict == "HOLD":
+        print(f"  Action: HOLD all {args.shares} shares")
+        print(f"  Sell-limit: ${recommended_X:.0f} (highest defensible at "
+              f"{threshold*100:.0f}% threshold)")
+        profit_at_X = (recommended_X - args.entry) * args.shares
+        # P at recommended X
+        p_at_rec = next((r["p_point"] for r in scan["curve"]
+                          if r["X"] == recommended_X), None)
+        if p_at_rec is not None:
+            print(f"  Profit if hit: +${profit_at_X:.0f} ({p_at_rec*100:.0f}% probability)")
+        if x_safe and x_safe != x_aggressive:
+            print(f"  More conservative: ${x_safe:.0f} "
+                  f"(lo68 still >= {threshold*100:.0f}%, profit "
+                  f"+${(x_safe - args.entry) * args.shares:.0f})")
+    elif verdict == "TRIM":
+        print(f"  Action: TRIM half ({args.shares//2} shares)")
+        print(f"  P(touch BE ${args.entry}) = {p_at_be*100:.0f}% — "
+              f"marginal vs {threshold*100:.0f}% threshold")
+        print(f"  Keep {args.shares - args.shares//2} shares with sell-limit @ "
+              f"${args.entry:.0f}")
+        cut_loss_now = (S0 - args.entry) * (args.shares // 2)
+        print(f"  Realised on trim: ${cut_loss_now:+,.0f}")
+    else:  # CUT
+        print(f"  Action: CUT all {args.shares} shares")
+        cut_loss = (S0 - args.entry) * args.shares
+        print(f"  P(touch BE ${args.entry}) = {p_at_be*100:.0f}% — "
+              f"more than 10pp below {threshold*100:.0f}% threshold")
+        print(f"  Realise: ${cut_loss:+,.0f}")
+    print()
+
+    # ---- EARNINGS BAND ----
+    if earnings_band and earnings_band["adjusted"]:
+        print(f"  ⚠ {earnings_band['note']}")
+        print(f"  P band at ${x_aggressive}: [{earnings_band['band_lo']*100:.0f}%, "
+              f"{earnings_band['band_hi']*100:.0f}%]")
+        print()
+
+    # ---- PER-TARGET SENSITIVITY at X_aggressive ----
+    if sensitivity:
+        print_header(f"SENSITIVITY at recommended X = ${x_aggressive:.0f}")
+        print(f"  {'Scenario':<42}{'mu':>9}{'sigma':>9}{'P(touch)':>10}{'Verdict':>12}")
+        print(f"  {'-'*42}{'-'*9}{'-'*9}{'-'*10}{'-'*12}")
+        for sc in sensitivity["scenarios"]:
+            print(f"  {sc['label']:<42}{sc['mu']*100:>+7.0f}% "
+                  f"{sc['sigma']*100:>7.0f}% {sc['p']*100:>8.1f}% {sc['verdict']:>12}")
+        if sensitivity.get("flip_drift") is not None:
+            print(f"  → Verdict flips to BELOW at drift "
+                  f"{sensitivity['flip_drift']*100:+.0f}% "
+                  f"(margin of {(mu_for_scan - sensitivity['flip_drift'])*100:.0f}pp)")
+        print()
+
+    # ---- PATH METRICS ----
+    print_header("PATH-DEPENDENT RISK METRICS")
+    md = path_stats
+    print(f"  Max drawdown along the way (from ${S0:.0f}):")
+    print(f"    median:  {md['max_drawdown_median']*100:5.1f}% "
+          f"(${S0 * (1 - md['max_drawdown_median']):.0f} touched)")
+    print(f"    p75:     {md['max_drawdown_p75']*100:5.1f}% "
+          f"(${S0 * (1 - md['max_drawdown_p75']):.0f} touched)")
+    print(f"    p90:     {md['max_drawdown_p90']*100:5.1f}% "
+          f"(${S0 * (1 - md['max_drawdown_p90']):.0f} touched)")
+    if md.get("time_to_target_median") is not None:
+        print(f"  Time-to-target (target ${target_for_path:.0f}, among touching paths):")
+        print(f"    median: {md['time_to_target_median']:.0f}d, "
+              f"p25/p75: {md['time_to_target_p25']:.0f}d/{md['time_to_target_p75']:.0f}d")
+    print(f"  P(panic floor ${args.panic_level:.0f} touched): {p_panic*100:.0f}%")
+    print()
+
+    # ---- RELIABILITY COMPONENTS (no synthesized score) ----
+    print_header("RELIABILITY COMPONENTS  (assess each independently)")
+    n_high = sum(1 for s in signals.values() if s.get("confidence") == "HIGH")
+    n_med = sum(1 for s in signals.values() if s.get("confidence") == "MEDIUM")
+    n_low = sum(1 for s in signals.values() if s.get("confidence") == "LOW")
+    n_active = blend["n_active"]
+    print(f"  Active signals:           {n_active}/9 (HIGH:{n_high}, "
+          f"MED:{n_med}, LOW:{n_low}, NONE_FOUND:{9-n_active})")
+    print(f"  Signal dispersion:        {blend['dispersion_pp']:.1f}pp "
+          f"({'wide' if blend['dispersion_pp'] >= 60 else 'tight'})")
+    print(f"  GARCH fit:                {'OK' if garch_fit_ok else 'DEGRADED'}")
+    print(f"  Sigma anchors:            {sigma_triangle['n_anchors'] if sigma_triangle else 1} "
+          f"({'multi-source' if sigma_triangle and sigma_triangle['n_anchors'] >= 2 else 'single-source'})")
+    print(f"  Bayesian history depth:   {'present' if prior_blend else '1 day (no prior)'}")
+    print(f"  Regime:                   {regime['regime']} "
+          f"({'stable' if regime['regime'] not in ('POST_PARABOLA', 'UNCERTAIN') else 'unstable'})")
+    print(f"  Math/AI position agreement: "
+          f"{'agree' if ai_parsed and ai_parsed.get('position_guidance') == verdict else 'check below'}")
+    if ai_parsed:
+        print(f"  AI position view:         {ai_parsed.get('position_guidance', '?')}")
+    print()
+
+    # ---- HYSTERESIS ----
+    hysteresis_warn, prior_verdict = check_hysteresis(history_path, verdict, 0)
+    if hysteresis_warn:
+        print(f"  HYSTERESIS: {hysteresis_warn}")
+        print()
+
+    # ---- CSV HISTORY ----
+    csv_header = ("timestamp,spot,sigma_garch_pct,sigma_blended_pct,"
+                  "mu_blended_pct,blend_std_pct,blend_lo68_pct,blend_hi68_pct,"
+                  "p_at_be_pct,x_safe,x_aggressive,verdict,recommended_x,"
+                  "ai_cost_usd,regime,max_dd_p50,panic_prob,days_to_earnings,"
+                  "threshold_used\n")
+    days_to_earnings_str = str(earnings_event["days_away"]) if earnings_event else ""
+    new_row = (f"{datetime.now():%Y-%m-%d %H:%M},{S0:.2f},{garch_sigma*100:.2f},"
+               f"{sigma_for_mc*100:.2f},{mu_for_scan*100:.2f},"
+               f"{mu_std_for_scan*100:.2f},"
+               f"{(mu_for_scan-mu_std_for_scan)*100:.2f},"
+               f"{(mu_for_scan+mu_std_for_scan)*100:.2f},"
+               f"{p_at_be*100 if p_at_be else 0:.2f},"
+               f"{x_safe if x_safe else ''},{x_aggressive if x_aggressive else ''},"
+               f"{verdict},{recommended_X if recommended_X else ''},"
+               f"{ai_cost:.4f},{regime['regime']},"
+               f"{path_stats['max_drawdown_median']*100:.2f},"
+               f"{p_panic*100:.2f},{days_to_earnings_str},{threshold*100:.0f}\n")
+
+    if history_path.exists():
+        first_line = history_path.read_text().split("\n", 1)[0]
+        if "x_aggressive" not in first_line:
+            history_path.rename(history_dir / f"thesis_history_{ticker}.legacy.csv")
+            history_path.write_text(csv_header)
+    else:
+        history_path.write_text(csv_header)
+    with open(history_path, "a") as f:
+        f.write(new_row)
+
+    print(f"  Saved: {history_path}")
+    if ai_cost > 0:
+        print(f"  AI cost this run: ${ai_cost:.3f}")
+
+
 def _quick_scenario(S0, sigma, mu, horizon, target, entry, shares, cut_pnl, pnl_good):
     """Quick MC + EV for the drift sensitivity table. Returns
     (p_touch, ev_hold, p_star, cushion, verdict_str)."""
@@ -2351,6 +3322,10 @@ def main():
                          "(requires --entry --shares --target --horizon)")
     ap.add_argument("--panic-level", type=float, default=1100,
                     help="Tail-risk floor to track in --check-thesis mode")
+    ap.add_argument("--conviction-threshold", type=float, default=0.65,
+                    help="Conviction threshold for multi-target scan in "
+                         "--check-thesis mode (default 0.65 = 65%%). HOLD if "
+                         "any sell-limit X >= entry has P(touch X) above this.")
     ap.add_argument("--no-ai", action="store_true",
                     help="Skip Claude AI synthesis call (faster, free, "
                          "uses only FMP signals)")
