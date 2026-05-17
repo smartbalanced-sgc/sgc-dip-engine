@@ -263,10 +263,14 @@ def run_monte_carlo_stock(
 def extract_statistics(paths, current_price):
     """
     Extract primary and fallback dip targets + rally targets from MC paths.
-    
-    Primary: PERCENTILE_TARGET percentile (deeper dip, moderate conviction)
-    Fallback: 80th percentile — shallower dip, higher conviction
-    Rally: 40th percentile of maximums (60% conviction rally target)
+
+    Primary dip: PERCENTILE_TARGET percentile of minimums (deeper dip, moderate conviction)
+    Fallback dip: 80th percentile of minimums (shallower dip, higher conviction)
+    Primary rally: (100 - RALLY_CONVICTION_PERCENTILE)th percentile of maximums
+                   (e.g. with rally_conviction=70, this is the 30th percentile of maximums,
+                    i.e. 70% of paths reach this rally price or higher)
+    Conservative rally: 10 percentage points more conservative than primary
+                        (e.g. rally_conviction=70 → conservative @ 80% conviction)
     """
     from config import PERCENTILE_TARGET
     from config_loader import get_config
@@ -290,16 +294,21 @@ def extract_statistics(paths, current_price):
     fallback_date_index = int(np.median(valid_hits)) if len(valid_hits) > 0 else median_date_index
     
     # --- Rally statistics (Session 5, config-driven in Session 6) ---
-    # rally_conviction_percentile from config.yaml (default 60)
-    # 60% conviction = 40th percentile of maximums (60% of paths reach this high or higher)
+    # rally_conviction_percentile from config.yaml (currently 70 — was 60 prior
+    # to 2026-05-16; see docs/handover/03_RATIONALE_AND_NUANCES.md for the
+    # decision history).
     # Formula: percentile_input = 100 - rally_conviction_percentile
+    # Example with rally_conviction=70: percentile_input = 30, so we take
+    # the 30th percentile of maxima → 70% of paths have their max at-or-above
+    # this value.
     maximums = paths.max(axis=1)
     max_dates = np.argmax(paths, axis=1)
-    
+
     rally_pct_input = 100 - RALLY_CONVICTION_PERCENTILE
     rally_target = np.percentile(maximums, rally_pct_input)
-    
-    # Conservative rally (rally_conviction_percentile + 10 for conservative view)
+
+    # Conservative rally: 10 percentage points higher conviction than primary
+    # (e.g. primary=70% → conservative=80% conviction, shallower rally target).
     rally_conservative_pct_input = max(0, 100 - (RALLY_CONVICTION_PERCENTILE + 10))
     rally_conservative = np.percentile(maximums, rally_conservative_pct_input)
     
@@ -353,8 +362,11 @@ def extract_statistics(paths, current_price):
         'fallback_confidence': fallback_confidence,
         'fallback_date_index': fallback_date_index,
         # Rally stats (Session 5, config-driven Session 6)
-        'rally_60': rally_target,           # Primary rally target (conviction from config)
-        'rally_70': rally_conservative,     # Conservative rally target
+        # §2026-05-16 renamed from rally_60/rally_70 → rally_primary/rally_conservative
+        # because the names previously implied specific percentile values (60/70)
+        # but the actual values track the YAML rally_conviction_percentile setting.
+        'rally_primary': rally_target,           # Primary rally target (conviction from config)
+        'rally_conservative': rally_conservative,  # Conservative rally target (primary conviction + 10pp)
         'rally_date_index': rally_date_index,
         'terminal_median': terminal_median,
         'daily_bands': daily_bands,  # §May 14 daily probability bands feature
@@ -459,8 +471,8 @@ def simulate_portfolio(portfolio_data, corr_matrix, ticker_order, regime_info, m
             'fallback_confidence': stats['fallback_confidence'],
             'fallback_date_index': stats['fallback_date_index'],
             # Rally stats (Session 5)
-            'rally_60': stats['rally_60'],
-            'rally_70': stats['rally_70'],
+            'rally_primary': stats['rally_primary'],
+            'rally_conservative': stats['rally_conservative'],
             'rally_date_index': stats['rally_date_index'],
             'terminal_median': stats['terminal_median'],
             'daily_bands': stats['daily_bands'],  # §May 14 daily probability bands feature — propagate to dashboard consumer

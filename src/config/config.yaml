@@ -103,10 +103,12 @@ signal:
   hysteresis_buffer_pct: 0.005
 
   # Rally target conviction: % of paths that reach rally target OR HIGHER
-  # 60 = 60% of paths reach this high (uses 40th percentile of maximums)
+  # 70 = 70% of paths reach this high (uses 30th percentile of maximums)
   # Raise to show more conservative (shallower) rally targets
   # Lower to show more aggressive (deeper) rally targets
-  rally_conviction_percentile: 60
+  # §2026-05-16: raised from 60 to 70 to match dip conviction. Produces lower
+  # but more confident rally targets across all stocks.
+  rally_conviction_percentile: 70
 
   # Minimum rally % to show on dashboard (hide trivial rallies)
   min_actionable_rally_pct: 0.01

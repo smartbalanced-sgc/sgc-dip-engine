@@ -135,17 +135,22 @@ def generate_html(execution_data, macro_regime, vix, portfolio_data,
         """
 
     # §May 13 patch B — Collapsible explainer for dip vs rally conviction percentages.
-    # Resolves the confusion that 70% dip + 60% rally seems > 100%.
+    # Resolves the confusion that dip% + rally% can seem to add over 100%.
     # In reality, they're independent measurements: a single path can both dip AND rally.
-    explainer_html = """
+    # §2026-05-16: example percentages now pulled live from config so the
+    # explainer stays consistent if the YAML values are changed.
+    from config_loader import get_config as _gc_ex
+    _explainer_dip_conv = _gc_ex('signal', 'percentile_target', default=70)
+    _explainer_rally_conv = _gc_ex('signal', 'rally_conviction_percentile', default=70)
+    explainer_html = f"""
         <div class="explainer">
             <details>
                 <summary>ℹ️ How to read Dip / Rally conviction — click to expand</summary>
                 <div class="explainer-body">
-                    <p><strong>Dip conviction (e.g. 70%):</strong> the % of simulated 60-day paths
+                    <p><strong>Dip conviction (currently {_explainer_dip_conv}%):</strong> the % of simulated 60-day paths
                        where the stock touched the dip price or lower at SOME point during the window.
                        Used for setting limit buys at expected lows.</p>
-                    <p><strong>Rally conviction (e.g. 60%):</strong> the % of simulated paths where the
+                    <p><strong>Rally conviction (currently {_explainer_rally_conv}%):</strong> the % of simulated paths where the
                        stock touched the rally price or higher at SOME point during the window.
                        Used for setting take-profit alerts.</p>
                     <p><strong>Why can they add to more than 100%?</strong> Both percentages measure
@@ -301,7 +306,7 @@ def generate_html(execution_data, macro_regime, vix, portfolio_data,
         else:
             target_display = f"⬇️ {ccy}{data['target_price']:.2f} · {data['date_range']} ({dip_display}{dip_override_suffix})"
 
-        # Session 5: Rally line (⬆️ expected rally target, 60% conviction)
+        # Session 5: Rally line (⬆️ expected rally target; conviction from config)
         rally_display = ""
         rally_price = data.get('rally_price')
         rally_pct = data.get('rally_pct', 0)

@@ -128,7 +128,7 @@ sgc-dip-engine/
 │   Output per stock:                                           │
 │     • paths array (10000, 60)                                │
 │     • percentile_low (70th of minimums)                      │
-│     • rally_60 (40th of maximums = 60% conviction)           │
+│     • rally_primary (30th of maximums = 70% conviction)      │
 │     • date indices, terminal price                           │
 └──────────────────────────────────────────────────────────────┘
             ↓
@@ -299,7 +299,7 @@ signal:
   percentile_target: 70           # 70th percentile of minimums
   materiality_threshold: 0.03     # 3% dip → BUY threshold
   fallback_percentile: 80         # Fallback BUY conviction level
-  rally_conviction_percentile: 60 # 60% conviction rally target
+  rally_conviction_percentile: 70 # 70% conviction rally target (raised from 60 on 2026-05-16)
 
 # Monte Carlo
 monte_carlo:

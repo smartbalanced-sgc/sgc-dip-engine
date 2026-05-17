@@ -422,8 +422,8 @@ def process_execution_signals(simulation_results, portfolio_data=None, macro_eve
             '_suppress_reason': suppress_reason,
             'fallback': fallback,
             # Session 5: Rally stats
-            'rally_price': result.get('rally_60'),
-            'rally_pct': (result.get('rally_60', current) / current - 1) if current > 0 else 0,
+            'rally_price': result.get('rally_primary'),
+            'rally_pct': (result.get('rally_primary', current) / current - 1) if current > 0 else 0,
             'rally_date_range': rally_date_range,
             'terminal_median': result.get('terminal_median'),
             # Session 8: Analyst consensus

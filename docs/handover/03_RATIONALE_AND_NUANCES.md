@@ -157,6 +157,68 @@ The daily bands feature (next build) MUST include a preamble that explicitly exp
 
 ---
 
+## 🔄 Threshold Revision History
+
+Decisions to change tunable thresholds (in `src/config/config.yaml`) are
+logged here so future sessions understand WHY the current values exist
+without re-litigating the choice.
+
+### Rally conviction percentile: 60 → 70 (2026-05-16)
+
+**Before:** `rally_conviction_percentile: 60`
+**After:** `rally_conviction_percentile: 70`
+**Trigger commit:** 2026-05-16 (Tier 3 refactor + threshold change)
+
+**Original rationale (60% conviction):** the May 13 build chose 60 to give
+a "moderate-conviction, deeper rally" view that paired well with the 70%
+dip conviction. The asymmetry (70 dip vs 60 rally) was a deliberate choice
+to err on the side of deeper dips (because Jesse buys dips) and shallower
+rally expectations (because rally targets that almost always hit produce
+weaker exit signal value).
+
+**Why raised to 70 on 2026-05-16:** Jesse re-evaluated and preferred a
+symmetric framework (70/70 instead of 70/60) for two reasons:
+1. **Higher conviction across the board.** A 70% conviction rally is
+   one that 70 of 100 simulated paths actually reach. A 60% conviction
+   rally is one that only 60 of 100 reach. The 70% version is more
+   reliable as an exit signal — easier to defend "the system said with
+   70% conviction this rally was coming" than the 60% framing.
+2. **Symmetry with the dip side.** Both events now expressed at the
+   same confidence level. Easier to communicate, less arithmetic in the
+   reader's head, more comparable across stocks.
+
+**Trade-off accepted:** rally TARGET PRICES are now LOWER across all
+stocks. The 70% bar is shallower than the 60% bar (more paths reach
+the shallower bar). Stocks that previously showed +22% rally targets
+at 60% conviction now show roughly +15-18% rally targets at 70%
+conviction. The system becomes more conservative on the upside but
+more confident in each individual signal.
+
+**Reversibility:** YAML-driven, no code changes locked in. Set
+`rally_conviction_percentile` back to 60 in `config.yaml` and the next
+run reverts the behaviour entirely. No data migration needed.
+
+**Related rename:** the per-stock result dict fields previously named
+`rally_60` / `rally_70` (a misleading reference to the old conviction
+values) were renamed to `rally_primary` / `rally_conservative` in the
+same commit. Names now describe their role rather than a specific
+percentile value, so they remain accurate if the conviction is tuned
+again in future.
+
+### Materiality threshold: 3% (unchanged since build)
+
+**Current:** `min_actionable_dip_pct: 0.03`
+**Status:** Unchanged since the May 13 build. Hysteresis band of 0.5%
+added 2026-05-15 to prevent BUY/WAIT flapping at this boundary.
+
+### Dip conviction percentile: 70 (unchanged since build)
+
+**Current:** `percentile_target: 70`
+**Status:** Unchanged since the May 13 build. Backtest hit rate at this
+setting is in the 63-68% range (target ≥65%).
+
+---
+
 ## 🛡️ Lessons Learned (Mistakes To Avoid)
 
 ### Lesson 1: Don't assume endpoint behavior without testing

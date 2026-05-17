@@ -5,7 +5,76 @@
 
 ---
 
-## 🏗️ Session — May 14, 2026 (most recent)
+## 🏗️ Session — May 15-16, 2026 (most recent)
+
+**Net result:** Long polishing session across dashboard UX, signal stability,
+AI quality, and a threshold change.
+
+### What shipped (commits in chronological order)
+
+- **Cost optimisation (`d8667dd`):** skip regime AI for vol-excluded stocks;
+  raise emergency-search Z-threshold from 2.5 to 3.0 for excluded stocks;
+  replace hardcoded AI cost estimates with real `response.usage` reads
+  (added `compute_call_cost()` helper in `sentiment.py`); cache TTL 24h→48h;
+  raise BUY-prioritization gate from <2 to <3.
+- **Daily bands rebuild (`38af418` → later replaced):** initial cumulative
+  min/max math; eventually rebuilt again as median path + zones (`4e9e072`).
+- **Mobile CSS + cost surfacing + ticker-mgmt cost estimator (`18fecad`):**
+  responsive table layout; cost banner under header; estimator constants
+  in `TICKER_MGMT_PROTOCOL.md`.
+- **Bundle: 8 changes (`4e9e072`):** thresholds panel at top; daily bands
+  rebuild #2 (median path + zone highlighting); mobile CSS scoping; new
+  `signal-table` class; "conviction" terminology; hysteresis band on
+  materiality threshold (new YAML key `signal.hysteresis_buffer_pct: 0.005`);
+  emergency search prompt upgrade with skepticism rules; regime AI prompt
+  upgrade with skepticism rules.
+- **Dashboard polish + AI debug print (`58e8cb7`):** thresholds panel trimmed
+  + left-aligned; per-stock "Dip conviction" line removed; "60% conviction"
+  removed from rally display line; plain-English regime notes.
+- **Parser fix + mobile scoping (`73f4316`):** multi-line REASONING parser
+  for regime AI; direct-child CSS selectors so nested daily-bands table
+  doesn't inherit outer stacking.
+- **Strip technical regime prefix + WAIT one-liner conviction (`2c3343e`):**
+  hardcoded "Breakdown — no reversal signal..." prefixes removed; plain-
+  English reasoning now stands alone; "(70% conviction)" stripped from
+  WAIT one-liners.
+- **Regime notes: dynamic prose + dual perspective (`933c522`):** rule-based
+  reasoning now varies adjectives by metric magnitude (catastrophically/
+  deeply/significantly etc.); every regime note now covers BOTH "For entry"
+  AND "If you're already holding" perspectives; AI prompt updated to require
+  the same dual perspective.
+- **Rally conviction raised from 60 to 70 (this session, end):** YAML
+  change + `rally_60`/`rally_70` field rename to `rally_primary`/
+  `rally_conservative` + comment cleanup + dynamic example values in the
+  conviction explainer paragraph. See `03_RATIONALE_AND_NUANCES.md`
+  threshold revision history for the reasoning.
+
+### Sacred files touched
+
+- `src/config/config.yaml` — added `hysteresis_buffer_pct`, raised cache_hours,
+  changed rally_conviction_percentile 60→70
+- `src/monte_carlo.py` — daily_bands rebuild (twice); rally field rename
+- `src/regime_classifier.py` — vol-excluded skip; real cost tracking;
+  prompt upgrades; multi-line REASONING parser
+- `src/execution_logic.py` — hysteresis band; plain-English regime notes;
+  rally_primary consumption
+
+### Behavioural deltas users will notice
+
+1. Rally target prices are LOWER (conviction raised from 60% to 70%)
+2. WM-style flapping at the 3% materiality boundary should stop
+3. Vol-excluded stocks no longer fire regime AI
+4. Cost banner at top of dashboard shows real Anthropic spend
+5. Regime notes are dual-perspective (entry + exit) and per-stock dynamic
+6. Daily bands feature now shows median path + zone highlighting
+
+### Forward eval date unchanged
+
+2026-06-13 — re-run regime backtest to evaluate MU prediction.
+
+---
+
+## 🏗️ Session — May 14, 2026
 
 **Date:** May 14, 2026
 **Duration:** ~6 hours
