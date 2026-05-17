@@ -446,7 +446,8 @@ def _fmp_get(endpoint, api_key, params=None):
 
 
 def fetch_analyst_targets(ticker, api_key):
-    """FMP price-target-consensus (12-month analyst price targets)."""
+    """FMP price-target-consensus (12-month analyst price targets).
+    Returns aggregate-only data (no per-analyst breakdown on Starter)."""
     data = _fmp_get("price-target-consensus", api_key, {"symbol": ticker})
     if not data or not isinstance(data, list) or not data:
         return None
@@ -456,6 +457,78 @@ def fetch_analyst_targets(ticker, api_key):
         "target_median": d.get("targetMedian"),
         "target_high":   d.get("targetHigh"),
         "target_low":    d.get("targetLow"),
+    }
+
+
+def fetch_analyst_summary(ticker, api_key):
+    """FMP price-target-summary — RECENT timeframe averages with analyst
+    counts per window. §2026-05-17 verified via curl: returns lastMonth,
+    lastQuarter, lastYear, allTime averages plus counts. Much better than
+    stale aggregate consensus for fast-moving stocks: a stock that rallies
+    300% in 6 months has lastYear targets dragged down by pre-rally data,
+    while lastMonth captures post-earnings analyst revisions.
+
+    Example SNDK response (May 2026):
+      lastMonth:   13 analysts, $1376 avg (post-Q3 reflection)
+      lastQuarter: 16 analysts, $1334 avg
+      lastYear:    46 analysts, $772 avg (stale)
+      allTime:     50 analysts, $716 avg (stale)
+    """
+    data = _fmp_get("price-target-summary", api_key, {"symbol": ticker})
+    if not data or not isinstance(data, list) or not data:
+        return None
+    d = data[0]
+    return {
+        "last_month_count":   int(d.get("lastMonthCount", 0) or 0),
+        "last_month_avg":     d.get("lastMonthAvgPriceTarget"),
+        "last_quarter_count": int(d.get("lastQuarterCount", 0) or 0),
+        "last_quarter_avg":   d.get("lastQuarterAvgPriceTarget"),
+        "last_year_count":    int(d.get("lastYearCount", 0) or 0),
+        "last_year_avg":      d.get("lastYearAvgPriceTarget"),
+        "all_time_count":     int(d.get("allTimeCount", 0) or 0),
+        "all_time_avg":       d.get("allTimeAvgPriceTarget"),
+        "publishers":         d.get("publishers", ""),
+    }
+
+
+def fetch_next_earnings(ticker, api_key, lookahead_days=120):
+    """FMP earnings-calendar — find next scheduled earnings event for
+    ticker within the lookahead window. §2026-05-17 verified via curl.
+
+    Returns dict with:
+      date         — ISO date string of next earnings
+      days_away    — days from today (int)
+      eps_est      — consensus EPS estimate
+      rev_est      — consensus revenue estimate
+      in_horizon   — bool: falls within the swing horizon (60d default)
+      approaching  — bool: falls just after horizon (60-90d post-horizon)
+                     so price will run up toward it in late horizon days
+
+    Returns None if no earnings found in window.
+    """
+    from_date = datetime.now().strftime("%Y-%m-%d")
+    to_date = (datetime.now() + timedelta(days=lookahead_days)).strftime("%Y-%m-%d")
+    data = _fmp_get("earnings-calendar", api_key,
+                    {"from": from_date, "to": to_date})
+    if not data or not isinstance(data, list):
+        return None
+    matches = [e for e in data if e.get("symbol") == ticker]
+    if not matches:
+        return None
+    matches.sort(key=lambda x: x.get("date", "9999-99-99"))
+    next_ev = matches[0]
+    try:
+        ev_date = datetime.strptime(next_ev["date"], "%Y-%m-%d")
+        days_away = (ev_date.date() - datetime.now().date()).days
+    except (ValueError, KeyError):
+        return None
+    return {
+        "date": next_ev["date"],
+        "days_away": days_away,
+        "eps_est": next_ev.get("epsEstimated"),
+        "rev_est": next_ev.get("revenueEstimated"),
+        "in_horizon": False,  # will be set by caller using actual horizon
+        "approaching": False,
     }
 
 
@@ -644,12 +717,66 @@ def _none_signal(reason):
             "notes": reason}
 
 
-def signal_from_analyst_targets(targets, S0, price_history_df=None):
+def signal_from_analyst_targets(targets, S0, price_history_df=None,
+                                  summary=None):
     """Convert FMP analyst targets to drift signal.
-    §2026-05-17 audit fix #3: staleness awareness. If spot has moved >25%
-    in either direction over the last 60d, aggregator consensus likely lags;
-    downgrade confidence. Also: if target_mean is below spot AND only a
-    fraction of analysts have updated post-earnings, flag this in notes."""
+
+    §2026-05-17 upgrade: prefer fresh `price-target-summary` data (last-month
+    avg) when available, falling back to the stale `price-target-consensus`
+    aggregate. For fast-moving stocks the freshness difference is dramatic:
+    SNDK consensus mean was $1268 (stale-mixed) vs lastMonth avg $1376
+    (post-Q3 reflection).
+
+    Staleness check still applies: if stock moved >25% in 60d AND we're using
+    anything older than last-month, downgrade confidence.
+    """
+    # ---- Path 1: use SUMMARY (fresh, preferred) ----
+    if summary:
+        target = None
+        n_analysts = 0
+        window = ""
+        base_conf = "MEDIUM"
+
+        # Prefer last-month if >=5 analysts (substantive sample)
+        if summary.get("last_month_count", 0) >= 5 and summary.get("last_month_avg"):
+            target = float(summary["last_month_avg"])
+            n_analysts = summary["last_month_count"]
+            window = "last month"
+            base_conf = "HIGH" if n_analysts >= 12 else "MEDIUM"
+        elif summary.get("last_quarter_count", 0) >= 5 and summary.get("last_quarter_avg"):
+            target = float(summary["last_quarter_avg"])
+            n_analysts = summary["last_quarter_count"]
+            window = "last quarter"
+            base_conf = "MEDIUM" if n_analysts >= 15 else "LOW"
+        elif summary.get("last_year_avg"):
+            target = float(summary["last_year_avg"])
+            n_analysts = summary.get("last_year_count", 0)
+            window = "last year"
+            base_conf = "LOW"  # likely stale on fast movers
+
+        if target and target > 0 and S0 > 0:
+            drift = (target / S0) - 1.0
+            staleness_note = ""
+            if window != "last month" and price_history_df is not None and len(price_history_df) >= 60:
+                try:
+                    p60 = float(price_history_df["Close"].iloc[-60])
+                    move_60d = abs((S0 - p60) / p60)
+                    if move_60d > 0.25:
+                        base_conf = "LOW"
+                        staleness_note = (f" (STALENESS: stock moved {move_60d*100:+.0f}% "
+                                          f"in 60d, only {window} avg available)")
+                except (ValueError, TypeError, IndexError):
+                    pass
+            return {
+                "drift": float(drift), "confidence": base_conf,
+                "source_quality": "REPUTABLE", "sources_count": int(n_analysts),
+                "notes": (f"{window} avg ${target:.0f} (n={n_analysts}), "
+                          f"vs spot ${S0:.0f}, drift implied {drift*100:+.1f}%"
+                          f"{staleness_note}"),
+            }
+        # If summary had no usable timeframe, fall through to consensus
+
+    # ---- Path 2: fall back to STALE consensus ----
     if not targets or not targets.get("target_mean") or S0 <= 0:
         return _none_signal("no analyst targets available")
     try:
@@ -667,25 +794,22 @@ def signal_from_analyst_targets(targets, S0, price_history_df=None):
         else:
             conf = "LOW"
 
-        # §2026-05-17 staleness check: how much has the stock moved over the
-        # last 60 days? If >25%, aggregator consensus likely hasn't refreshed.
-        staleness_note = ""
+        staleness_note = " (stale-mixed consensus fallback)"
         if price_history_df is not None and len(price_history_df) >= 60:
             try:
                 p60 = float(price_history_df["Close"].iloc[-60])
                 move_60d = abs((S0 - p60) / p60)
                 if move_60d > 0.25:
-                    # Downgrade one tier
-                    conf = "LOW" if conf in ("HIGH", "MEDIUM") else "LOW"
-                    staleness_note = (f" (STALENESS: stock moved {move_60d*100:+.0f}% "
-                                      f"in 60d — consensus likely lags)")
+                    conf = "LOW"
+                    staleness_note = (f" (STALE: stock moved {move_60d*100:+.0f}% "
+                                      f"in 60d, consensus lags; no fresh summary either)")
             except (ValueError, TypeError, IndexError):
                 pass
 
         return {
             "drift": float(drift), "confidence": conf,
             "source_quality": "REPUTABLE", "sources_count": 5,
-            "notes": (f"target mean ${target:.0f}, range ${low:.0f}-${high:.0f}"
+            "notes": (f"consensus mean ${target:.0f}, range ${low:.0f}-${high:.0f}"
                       f"{staleness_note}"),
         }
     except (ValueError, TypeError):
@@ -811,7 +935,8 @@ def signal_from_ai(ai_parsed):
 
 def build_ai_synthesis_prompt(ticker, profile, S0, sigma, horizon, recent_news,
                               press_releases, sector_perf, analyst_targets,
-                              insider, macro):
+                              insider, macro, earnings_event=None,
+                              analyst_summary=None):
     company_name = (profile.get("companyName") if profile else ticker) or ticker
     sector = (profile.get("sector") if profile else "Unknown") or "Unknown"
     industry = (profile.get("industry") if profile else "") or ""
@@ -830,12 +955,31 @@ def build_ai_synthesis_prompt(ticker, profile, S0, sigma, horizon, recent_news,
                   f"{sector_perf['cum_return_pct']:+.1f}% last "
                   f"{sector_perf['n_days']}d"
                   if sector_perf else "sector data unavailable")
-    if analyst_targets and analyst_targets.get("target_mean"):
+    if analyst_summary and analyst_summary.get("last_month_avg"):
+        # Prefer fresh last-month avg (§2026-05-17 upgrade A)
+        analyst_str = (f"last-month avg ${analyst_summary['last_month_avg']:.0f} "
+                       f"(n={analyst_summary['last_month_count']}), "
+                       f"last-quarter avg ${analyst_summary.get('last_quarter_avg', 0):.0f} "
+                       f"(n={analyst_summary.get('last_quarter_count', 0)}), "
+                       f"stale all-time avg ${analyst_summary.get('all_time_avg', 0):.0f}")
+    elif analyst_targets and analyst_targets.get("target_mean"):
         analyst_str = (f"consensus target ${analyst_targets['target_mean']:.0f} "
                        f"(range ${analyst_targets.get('target_low') or 0:.0f}-"
-                       f"${analyst_targets.get('target_high') or 0:.0f})")
+                       f"${analyst_targets.get('target_high') or 0:.0f}) [stale-mixed]")
     else:
         analyst_str = "no analyst consensus available"
+
+    if earnings_event:
+        earnings_str = (f"next earnings {earnings_event['date']} "
+                        f"({earnings_event['days_away']} days away)")
+        if earnings_event.get("eps_est"):
+            earnings_str += f", EPS est ${earnings_event['eps_est']:.2f}"
+        if earnings_event["in_horizon"]:
+            earnings_str += " — WITHIN HORIZON (event-day risk)"
+        elif earnings_event["approaching"]:
+            earnings_str += " — approaching (late-horizon run-up)"
+    else:
+        earnings_str = "no earnings event in next 90+ days"
     if insider and (insider["n_buys"] + insider["n_sells"]) > 0:
         direction = "buying" if insider["net_value_usd"] > 0 else "selling"
         insider_str = (f"net {direction} ${abs(insider['net_value_usd'])/1e6:.1f}M "
@@ -870,10 +1014,11 @@ CONTEXT DATA (from FMP, today):
 - Current spot: ${S0:.2f}
 - GARCH vol: {sigma*100:.0f}% annualised (CHARACTERISES dispersion, NOT direction)
 - Sector context: {sector_str}
-- Analyst consensus: {analyst_str}
+- Analyst targets: {analyst_str}
 - Insider activity: {insider_str} (note: includes any tax-withholding dispositions
   under Rule 16b-3(e); discount procedural sales when estimating sentiment)
 - Macro backdrop: {macro_str}
+- Earnings calendar: {earnings_str}
 
 RECENT NEWS HEADLINES (FMP, last 30-90 days):
 {news_block}
@@ -1520,6 +1665,9 @@ def check_thesis_mode(args):
         except (ValueError, TypeError):
             continue
     analyst_targets = fetch_analyst_targets(ticker, api_key)
+    # §2026-05-17 upgrade A: fetch RECENT analyst summary (last-month avg)
+    # to avoid stale consensus drag on fast-moving stocks
+    analyst_summary = fetch_analyst_summary(ticker, api_key)
     # §2026-05-17 fix: pass stock's exchange so sector-perf filters to the
     # right rows (endpoint returns one row per exchange per date).
     stock_exchange = profile.get("exchange", "NASDAQ") or "NASDAQ"
@@ -1533,6 +1681,16 @@ def check_thesis_mode(args):
     # and web_search. Per FMP support confirmation 2026-05-17.
     press_releases = []
 
+    # §2026-05-17 upgrade B: fetch next earnings event (Q3 of these confirms
+    # SNDK Q4 FY26 reports Aug 13, 2026 — falls 28 days after a 60d horizon
+    # starting today, but late-horizon will see run-up positioning)
+    earnings_event = fetch_next_earnings(ticker, api_key,
+                                          lookahead_days=args.horizon + 60)
+    if earnings_event:
+        earnings_event["in_horizon"] = earnings_event["days_away"] <= args.horizon
+        earnings_event["approaching"] = (args.horizon < earnings_event["days_away"]
+                                          <= args.horizon + 30)
+
     # === REGIME + VOL ADVISORY (Tier 1 #11, #12) ===
     regime = detect_swing_regime(rsi, mom_5d, mom_30d, sigma, ytd_pct)
     vol_advice = vol_regime_advisory(sigma)
@@ -1542,7 +1700,8 @@ def check_thesis_mode(args):
         "historical": signal_from_historical(mu_effective_historical,
                                               mu_hist, sigma),
         "analyst":    signal_from_analyst_targets(analyst_targets, S0,
-                                                   price_history_df=df),
+                                                   price_history_df=df,
+                                                   summary=analyst_summary),
         "sector":     signal_from_sector(sector_perf),
         "macro":      signal_from_macro(macro),
         "insider":    signal_from_insider(insider, market_cap_usd=market_cap_usd),
@@ -1556,7 +1715,8 @@ def check_thesis_mode(args):
         prompt = build_ai_synthesis_prompt(
             ticker, profile, S0, sigma, args.horizon,
             recent_news, press_releases, sector_perf, analyst_targets,
-            insider, macro)
+            insider, macro, earnings_event=earnings_event,
+            analyst_summary=analyst_summary)
         ai_parsed, ai_cost, ai_raw = call_ai_analyst(
             prompt, model=args.ai_model, max_tokens=3000)
         if ai_parsed is not None:
@@ -1649,6 +1809,36 @@ def check_thesis_mode(args):
     print(f"  Vol level:  {vol_advice['level']}")
     print(f"  Advisory:   {vol_advice['advisory']}")
     print()
+
+    # ---- EARNINGS CALENDAR (NEW §2026-05-17 upgrade B) ----
+    if earnings_event:
+        print_header("EARNINGS CALENDAR")
+        ev = earnings_event
+        print(f"  Next earnings:      {ev['date']} ({ev['days_away']} trading days away)")
+        if ev.get("eps_est") is not None:
+            print(f"  EPS estimate:       ${ev['eps_est']:.2f}")
+        if ev.get("rev_est") is not None:
+            print(f"  Revenue estimate:   ${ev['rev_est']/1e9:.2f}B")
+        print()
+        if ev["in_horizon"]:
+            print(f"  WARNING: Earnings event falls WITHIN your {args.horizon}-day")
+            print(f"  horizon. Earnings days commonly see +/-15-30% one-day moves")
+            print(f"  with implied vol often 2x trailing realised. The drift / cushion")
+            print(f"  math UNDERESTIMATES event-day risk. Consider trimming or hedging")
+            print(f"  before earnings if math is borderline.")
+        elif ev["approaching"]:
+            print(f"  CONTEXT: Earnings is {ev['days_away'] - args.horizon} days AFTER")
+            print(f"  your {args.horizon}-day horizon. Late-horizon will see run-up")
+            print(f"  positioning (often elevated vol + drift bias in run-up window).")
+            print(f"  Not a direct decision driver but worth noting.")
+        else:
+            print(f"  Earnings is comfortably outside the horizon — no event-day adj.")
+        print()
+    else:
+        print_header("EARNINGS CALENDAR")
+        print(f"  No earnings event found in next {args.horizon + 60} days")
+        print(f"  (or FMP earnings-calendar returned no match)")
+        print()
 
     # ---- FORWARD DRIFT INTELLIGENCE PANEL ----
     print_header("FORWARD DRIFT INTELLIGENCE")
@@ -1940,7 +2130,7 @@ def check_thesis_mode(args):
                   "mu_analyst_pct,mu_sector_pct,mu_macro_pct,mu_insider_pct,"
                   "mu_ai_pct,p_touch_pct,breakeven_p_pct,cushion_pp,ev_hold,"
                   "ev_cut,verdict,position_guidance,ai_cost_usd,"
-                  "regime,max_dd_p50,max_dd_p90,panic_prob\n")
+                  "regime,max_dd_p50,max_dd_p90,panic_prob,days_to_earnings\n")
 
     def _fmt_drift(d):
         return f"{d*100:.2f}" if d is not None else ""
@@ -1949,6 +2139,7 @@ def check_thesis_mode(args):
     blend_lo_str = f"{blend['lo68']*100:.2f}" if blend.get('lo68') is not None else ""
     blend_hi_str = f"{blend['hi68']*100:.2f}" if blend.get('hi68') is not None else ""
 
+    days_to_earnings_str = str(earnings_event["days_away"]) if earnings_event else ""
     new_row = (f"{datetime.now():%Y-%m-%d %H:%M},{S0:.2f},{sigma*100:.2f},"
                f"{mu_effective_historical*100:.2f},{mu_for_decision*100:.2f},"
                f"{blend_std_str},{blend_lo_str},{blend_hi_str},"
@@ -1961,12 +2152,13 @@ def check_thesis_mode(args):
                f"{cushion_pp:.2f},{ev_hold:.0f},{cut_pnl:.0f},"
                f"{verdict},{mech_guidance},{ai_cost:.4f},"
                f"{regime['regime']},{path_stats['max_drawdown_median']*100:.2f},"
-               f"{path_stats['max_drawdown_p90']*100:.2f},{p_panic*100:.2f}\n")
+               f"{path_stats['max_drawdown_p90']*100:.2f},{p_panic*100:.2f},"
+               f"{days_to_earnings_str}\n")
 
-    # Migrate old CSV to .legacy if schema differs
+    # Migrate old CSV to .legacy if schema differs (check new days_to_earnings col)
     if history_path.exists():
         first_line = history_path.read_text().split("\n", 1)[0]
-        if "blend_std_pct" not in first_line:
+        if "days_to_earnings" not in first_line:
             history_path.rename(history_dir / f"thesis_history_{ticker}.legacy.csv")
             history_path.write_text(csv_header)
     else:
