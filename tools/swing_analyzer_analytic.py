@@ -469,7 +469,10 @@ def fetch_company_profile(ticker, api_key):
 
 def fetch_sector_perf(sector, api_key, days=30):
     """FMP historical-sector-performance — CANON: §sacred requires
-    sector + from/to dates (otherwise stale 2024 data)."""
+    sector + from/to dates (otherwise stale 2024 data). §2026-05-17 fix:
+    response field is `averageChange` per SGC src/data_fetcher.py canon,
+    not `changesPercentage` as I had it. Also try alternative field names
+    for robustness."""
     if not sector:
         return None
     end = datetime.now().strftime("%Y-%m-%d")
@@ -480,12 +483,26 @@ def fetch_sector_perf(sector, api_key, days=30):
         return None
     rows = sorted(data, key=lambda x: x.get("date", ""))
     rows = rows[-days:]
-    if not rows or "changesPercentage" not in rows[0]:
+    if not rows:
+        return None
+    # Try multiple possible field names (FMP has used different names
+    # historically; canon SGC code uses averageChange)
+    field_candidates = ["averageChange", "changesPercentage", "changePercent",
+                        "change"]
+    field = None
+    for f in field_candidates:
+        if f in rows[0]:
+            field = f
+            break
+    if field is None:
         return None
     cum_return = 1.0
     for r in rows:
         try:
-            cum_return *= (1 + float(r.get("changesPercentage", 0)) / 100.0)
+            val = float(r.get(field, 0))
+            # averageChange may be already decimal (0.01 = 1%) or percentage
+            # (1.0 = 1%). Heuristic: if max abs >5, it's pct; else decimal.
+            cum_return *= (1 + val / 100.0) if abs(val) > 0.5 else (1 + val)
         except (ValueError, TypeError):
             continue
     cum_return -= 1.0
@@ -493,6 +510,7 @@ def fetch_sector_perf(sector, api_key, days=30):
         "cum_return_pct": cum_return * 100,
         "n_days": len(rows),
         "sector": sector,
+        "field_used": field,  # for debugging
     }
 
 
@@ -1474,17 +1492,26 @@ def check_thesis_mode(args):
     # === FETCH INTEL ===
     profile = fetch_company_profile(ticker, api_key) or {}
     sector_name = profile.get("sector") or "Technology"
+    # §2026-05-17 fix: try multiple market-cap field names. FMP profile
+    # endpoint has used 'mktCap', 'marketCap' in different versions.
     market_cap_usd = None
-    try:
-        market_cap_usd = float(profile.get("mktCap") or 0) or None
-    except (ValueError, TypeError):
-        market_cap_usd = None
+    for field_name in ("mktCap", "marketCap", "mcap", "market_cap"):
+        try:
+            v = profile.get(field_name)
+            if v and float(v) > 0:
+                market_cap_usd = float(v)
+                break
+        except (ValueError, TypeError):
+            continue
     analyst_targets = fetch_analyst_targets(ticker, api_key)
     sector_perf = fetch_sector_perf(sector_name, api_key, days=30)
     insider = fetch_insider_activity(ticker, api_key, days=90)
     macro = fetch_macro_indicators(api_key)
     recent_news = fetch_recent_news(ticker, api_key, limit=20)
-    press_releases = fetch_press_releases(ticker, api_key, limit=10)
+    # §2026-05-17: press-releases endpoint requires FMP Premium plan (Starter
+    # returns 402). Skipped — AI synthesis still gets context via news/stock
+    # and web_search. Per FMP support confirmation 2026-05-17.
+    press_releases = []
 
     # === REGIME + VOL ADVISORY (Tier 1 #11, #12) ===
     regime = detect_swing_regime(rsi, mom_5d, mom_30d, sigma, ytd_pct)
