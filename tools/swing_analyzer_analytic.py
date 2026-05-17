@@ -1617,20 +1617,17 @@ def triangulate_sigma(garch_sigma, realized_vol_dict, options_iv_data):
 
 
 def fetch_short_interest(ticker, api_key):
-    """Try FMP first (likely 402 on Starter), fall back to yfinance.
-    Returns: {short_percent_of_float, days_to_cover, source} or None."""
-    # Try FMP — there's no canonical Starter endpoint, but try common ones
-    data = _fmp_get("share-float", api_key, {"symbol": ticker})
-    if data and isinstance(data, list) and data:
-        d = data[0]
-        spf = d.get("shortPercentOfFloat") or d.get("shortFloatPercent")
-        if spf is not None:
-            return {
-                "short_percent_of_float": float(spf),
-                "days_to_cover": d.get("shortRatio"),
-                "source": "FMP",
-            }
-    # yfinance fallback
+    """Short interest data. §2026-05-17 verified empirically: FMP Starter
+    plan does not have a `share-float` endpoint (404). FMP support has not
+    indicated any Starter-tier short-interest endpoint exists. yfinance is
+    the canonical source — uses Yahoo Finance's `shortPercentOfFloat`
+    field which is updated bi-monthly from FINRA reports.
+    Returns: {short_percent_of_float, days_to_cover, source} or None.
+    """
+    # yfinance is the reliable source for retail short-interest data.
+    # FMP attempt removed per audit-fix 2026-05-17 (was producing 404 noise
+    # without delivering data). If FMP later adds a Starter endpoint for
+    # short interest, restore as a primary check above the yfinance call.
     try:
         import yfinance as yf
         info = yf.Ticker(ticker).info or {}
@@ -1642,8 +1639,8 @@ def fetch_short_interest(ticker, api_key):
                 "days_to_cover": float(dtc) if dtc else None,
                 "source": "yfinance",
             }
-    except Exception:
-        pass
+    except Exception as e:
+        print(f"   WARNING: yfinance short-interest fetch failed: {e}")
     return None
 
 
