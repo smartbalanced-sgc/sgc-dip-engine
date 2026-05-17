@@ -246,6 +246,8 @@ After reading this file, read the handover documentation in order:
 
 - **`docs/handover/TICKER_MGMT_PROTOCOL.md`** — Operating procedure for sessions dedicated to portfolio ticker add/remove. Canon rule: a ticker-mgmt session does ONLY ticker additions and deletions, nothing else. If Jesse opens a session described as "ticker management," "stock additions," or similar, load this protocol immediately and follow its rules.
 
+- **`docs/handover/SNDK_SWING_TOOL.md`** — Operating procedure for the SNDK swing-trade decision tool (`tools/swing_analyzer_analytic.py --check-thesis`). Contains locked v4 design decisions, the `/sndk` magic-word daily workflow, anti-patterns to prevent design drift, and synthesis format for daily output. If Jesse opens a session for SNDK swing analysis, daily check, or "/sndk", LOAD THIS DOC IMMEDIATELY before responding. Hard-won context from ~50 hours of design iteration — DO NOT re-litigate locked decisions.
+
 ---
 
 ## 🎯 YOUR FIRST RESPONSE IN A NEW SESSION
