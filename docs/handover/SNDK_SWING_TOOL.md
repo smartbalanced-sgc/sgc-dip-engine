@@ -257,6 +257,35 @@ mistake that wasted cycles or biased output:
     cleaned up in §2026-05-17 cleanup to "X_safe pass" / "X_aggressive only"
     / "below threshold" to align with v4 vocabulary.
 
+13. **DO NOT merge this feature branch (`claude/analyze-sandisk-trading-6zYxn`)
+    to `main`.** This is the most important guardrail in the doc. The
+    architecture is INTENTIONAL: the swing tool is a TEMPORARY artifact
+    that exists only until Jesse exits the SNDK position. Tool + handover
+    doc deliberately live on this feature branch. Main stays clean of
+    temporary swing-trade work.
+
+    When the trade exits (sell-limit fills OR Jesse cuts manually), the
+    branch is DELETED — taking the tool, this doc, and all swing-related
+    commits with it. Main was never touched. Clean.
+
+    A helpful-but-misguided session might think "let me tidy up by merging
+    the work to main." This DEFEATS the architecture. Do not do it.
+
+    FORBIDDEN without an explicit "merge to main" instruction from Jesse:
+    - `git checkout main && git merge claude/analyze-sandisk-trading-6zYxn`
+    - `git push origin main` after any local merge of this branch
+    - Creating a PR/MR from this branch to main via gh/MCP/anything
+    - Triggering any automation (workflows, hooks) that could land changes on main
+    - Cherry-picking commits from this branch onto main
+
+    ALLOWED without further approval:
+    - Committing to this branch itself (with normal "go" approval)
+    - Pushing this branch to its own origin (with normal "push it" approval)
+    - Reading files from main for context
+
+    If Jesse says "merge to main" — pause and confirm twice before doing it.
+    Default behavior: never merge.
+
 ---
 
 ## 9. CURRENT STATE (as of session lock, 2026-05-17)
@@ -358,10 +387,99 @@ in the model, address it.
 
 ---
 
+## 13. TRADE EXIT CLEANUP PROTOCOL
+
+When Jesse exits the SNDK position (sell-limit fills, or he cuts manually),
+the swing tool's purpose is complete. The architecture calls for deleting
+the entire feature branch so main is unaffected.
+
+### Pre-conditions (verify before any cleanup)
+
+Jesse must EXPLICITLY confirm one of:
+- "Sell-limit hit at $X, exited at +$Y profit"
+- "Cut at $X, realised -$Y loss"
+- "Exited position, swing trade complete"
+
+Do NOT initiate cleanup based on tool output alone (e.g., a high P(touch)
+or favourable verdict). The trade only ends when Jesse confirms the
+brokerage transaction completed.
+
+### Cleanup steps (only after explicit confirmation)
+
+```bash
+# Pre-flight: ensure we're not losing uncommitted work
+cd ~/sgc/sgc-dip-engine
+git status                        # confirm clean working tree on feature branch
+git checkout main                 # switch off the branch
+git pull origin main              # ensure main is fresh
+
+# Delete the feature branch
+git branch -D claude/analyze-sandisk-trading-6zYxn       # local delete
+git push origin --delete claude/analyze-sandisk-trading-6zYxn  # remote delete
+
+# Verify clean state
+git branch -a | grep -i sndk      # should return nothing
+ls tools/swing_analyzer*.py        # should return No such file or directory
+ls docs/handover/SNDK*             # should return No such file or directory
+```
+
+### What gets deleted
+
+- `tools/swing_analyzer.py`
+- `tools/swing_analyzer_analytic.py`
+- `tools/output/thesis_history_SNDK.csv` (and any `.legacy.csv` variants)
+- `tools/output/swing_*.json` and `swing_*.txt` artifacts
+- `docs/handover/SNDK_SWING_TOOL.md` (this doc itself)
+- The `CLAUDE.md` "Special-purpose protocols" entry (only existed on feature branch)
+- All ~25 commits of swing-tool work
+
+### What stays on main
+
+- The original SGC dip engine (unchanged)
+- The daily cron at 21:30 UK (unchanged)
+- All 22-year DCA strategy infrastructure
+- No trace of the swing trade
+
+### Operational cleanup (Jesse's local environment)
+
+```bash
+# Remove the sndk alias from ~/.zshrc (or sndk_daily function if used)
+# Edit ~/.zshrc and delete the swing-tool alias lines
+source ~/.zshrc
+```
+
+### Anti-patterns during exit
+
+- **DO NOT delete the branch before Jesse explicitly confirms exit.** A
+  high P(touch) is not an exit confirmation — only Jesse's account
+  statement / brokerage notification counts.
+- **DO NOT delete the CSV history without Jesse's permission.** He may
+  want to archive it (e.g., move to `~/swing_archive/` locally) for
+  retrospective analysis of how the model performed.
+- **DO NOT merge to main "as a final tidy-up."** The architecture is
+  delete-not-merge.
+- **DO NOT continue running the daily check after exit.** It would just
+  re-fetch data, run AI, and produce a verdict for a position that no
+  longer exists. Wasteful.
+
+### Post-exit retrospective (optional, Jesse's call)
+
+After cleanup, Jesse may want a brief retrospective: how did the model
+perform vs the actual outcome? This is a separate exercise — not part
+of the cleanup. If Jesse asks for it, the relevant data is:
+- The archived CSV (if he saved it)
+- The actual exit price and time
+- The model's daily P(touch X) trajectory vs what actually happened
+
+This would inform future swing-tool calibration, but is OUT OF SCOPE for
+the SNDK trade itself. Don't volunteer to do this unless asked.
+
+---
+
 ## Document maintenance
 
 - **Created:** 2026-05-17
-- **Last updated:** 2026-05-17 (initial creation, locking v4 design)
+- **Last updated:** 2026-05-17 (initial creation, locking v4 design + branch-isolation guardrails)
 - **Authoritative commit at creation:** `6b5e0df`
 - **Future updates:** append change log entries below
 
