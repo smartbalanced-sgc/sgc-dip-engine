@@ -467,12 +467,19 @@ def fetch_company_profile(ticker, api_key):
     return data[0]
 
 
-def fetch_sector_perf(sector, api_key, days=30):
+def fetch_sector_perf(sector, api_key, days=30, exchange_filter="NASDAQ"):
     """FMP historical-sector-performance — CANON: §sacred requires
     sector + from/to dates (otherwise stale 2024 data). §2026-05-17 fix:
     response field is `averageChange` per SGC src/data_fetcher.py canon,
     not `changesPercentage` as I had it. Also try alternative field names
-    for robustness."""
+    for robustness.
+
+    §2026-05-17 follow-up fix (verified via curl test): the endpoint
+    returns ONE row per (date, exchange) pair, where exchange is one of
+    NASDAQ / NYSE / AMEX. Without filtering, the last-N-rows truncation
+    grabs mixed exchanges and incomplete date coverage. Filter to the
+    stock's exchange (default NASDAQ for tech), then take last N unique
+    dates."""
     if not sector:
         return None
     end = datetime.now().strftime("%Y-%m-%d")
@@ -481,7 +488,13 @@ def fetch_sector_perf(sector, api_key, days=30):
                     {"sector": sector, "from": start, "to": end})
     if not data or not isinstance(data, list) or len(data) < 2:
         return None
-    rows = sorted(data, key=lambda x: x.get("date", ""))
+    # §2026-05-17 fix: filter to one exchange (default NASDAQ).
+    filtered = [r for r in data
+                if not exchange_filter or r.get("exchange") == exchange_filter]
+    # If filter eliminated everything, fall back to all rows (better than None)
+    if not filtered:
+        filtered = data
+    rows = sorted(filtered, key=lambda x: x.get("date", ""))
     rows = rows[-days:]
     if not rows:
         return None
@@ -500,9 +513,11 @@ def fetch_sector_perf(sector, api_key, days=30):
     for r in rows:
         try:
             val = float(r.get(field, 0))
-            # averageChange may be already decimal (0.01 = 1%) or percentage
-            # (1.0 = 1%). Heuristic: if max abs >5, it's pct; else decimal.
-            cum_return *= (1 + val / 100.0) if abs(val) > 0.5 else (1 + val)
+            # §2026-05-17 verified via curl test: FMP returns averageChange
+            # in PERCENT units (e.g. 0.12 = 0.12%, 2.57 = 2.57%). Always
+            # divide by 100. The earlier "heuristic" was wrong for small
+            # values like 0.12 (treated incorrectly as 12% daily).
+            cum_return *= (1 + val / 100.0)
         except (ValueError, TypeError):
             continue
     cum_return -= 1.0
@@ -510,6 +525,7 @@ def fetch_sector_perf(sector, api_key, days=30):
         "cum_return_pct": cum_return * 100,
         "n_days": len(rows),
         "sector": sector,
+        "exchange": exchange_filter,
         "field_used": field,  # for debugging
     }
 
@@ -1504,7 +1520,11 @@ def check_thesis_mode(args):
         except (ValueError, TypeError):
             continue
     analyst_targets = fetch_analyst_targets(ticker, api_key)
-    sector_perf = fetch_sector_perf(sector_name, api_key, days=30)
+    # §2026-05-17 fix: pass stock's exchange so sector-perf filters to the
+    # right rows (endpoint returns one row per exchange per date).
+    stock_exchange = profile.get("exchange", "NASDAQ") or "NASDAQ"
+    sector_perf = fetch_sector_perf(sector_name, api_key, days=30,
+                                     exchange_filter=stock_exchange)
     insider = fetch_insider_activity(ticker, api_key, days=90)
     macro = fetch_macro_indicators(api_key)
     recent_news = fetch_recent_news(ticker, api_key, limit=20)
