@@ -1071,11 +1071,45 @@ SKEPTICISM RULES:
 - If sector is rallying with the stock, lean MODEST drift (not extrapolation)
 - If a single news item drives an entire bull/bear case, downgrade to SPECULATIVE
 
-POSITION_GUIDANCE rules (the user already owns the stock):
-- HOLD: drift_point >= +20% AND confidence MEDIUM+ AND no severe bear factors
-- TRIM: drift_point in [0%, +20%) OR confidence LOW OR mixed bull/bear signals
-- CUT: drift_point < 0% OR severe bear factor with PRIMARY source confirmation
-- ADD: drift_point >= +40% AND confidence HIGH AND strong bull conviction (rare)
+POSITION_GUIDANCE rules — v4 multi-target conviction scan framework
+(updated 2026-05-17 to align with the user's actual decision rule):
+
+The user holds the stock and seeks the HIGHEST sell-limit X where
+P(touch X in horizon) >= conviction threshold (default 65%).
+Your drift estimate feeds into a blended drift used by a multi-target
+scan that finds X_aggressive (point estimate clears threshold) and
+X_safe (lo68 CI bound clears threshold).
+
+Position guidance values:
+
+- HOLD: At your estimated drift, you believe there exists a defensible X
+  >= entry where P(touch X) >= threshold AND you have NO severe qualitative
+  bear factor that the quantitative model can't capture
+  (i.e., your concerns are already reflected in your drift estimate
+  and the sigma/regime inputs).
+
+- TRIM: You see qualitative bear factors NOT captured in the drift/sigma
+  inputs — e.g., narrative regime change risk (NAND cycle peak),
+  concentration risk (customer / supplier), post-parabolic mean-reversion
+  risk specific to this name, or governance / disclosure issues — that
+  materially affect the forward distribution beyond what GBM with
+  blended drift can express. ALSO use TRIM if you genuinely cannot
+  distinguish between HOLD and CUT (knife-edge case).
+
+- CUT: At your estimated drift, you believe no X >= entry could meet
+  the threshold, OR there's a severe PRIMARY-source bear catalyst
+  (e.g., negative earnings pre-announcement, fraud, regulatory action)
+  that materially shifts the distribution beyond what the inputs reflect.
+
+- ADD: Very high drift conviction (>= +40% with HIGH confidence) AND a
+  strong, specific bull catalyst not yet in the price (rare).
+
+CRITICAL anti-double-counting rule:
+If your concern is ALREADY in the inputs (high vol, parabolic YTD, post-IPO
+stretch — these are all visible to the model), do NOT downgrade to TRIM —
+the model already prices that. Default to HOLD. TRIM is only for concerns
+the QUANTITATIVE inputs CAN'T capture (regime changes, concentration,
+narrative-driven dynamics, specific unmodeled risks).
 
 OUTPUT STRICT JSON (no markdown fences, no preamble, parseable directly):
 
