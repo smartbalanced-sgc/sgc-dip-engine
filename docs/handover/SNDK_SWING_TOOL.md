@@ -288,16 +288,33 @@ mistake that wasted cycles or biased output:
 
 ---
 
-## 9. CURRENT STATE (as of session lock, 2026-05-17)
+## 9. CURRENT STATE (as of session lock, 2026-05-17) — SNAPSHOT ONLY
 
-These values will be STALE in future sessions. Always re-run the tool to get
-current state. Listed here for context only:
+> ⚠️ **STALE-DATA WARNING — READ BEFORE USING ANY VALUE BELOW.**
+>
+> These values are a frozen snapshot from the locked design session on
+> **2026-05-17**. They are NOT live. SNDK's spot price moves every trading
+> day; the drift estimate updates with new signals; X_aggressive and
+> X_safe shift as the math re-runs. Quoting these values to Jesse as
+> "current" — even with the date qualifier — is misleading.
+>
+> **If Jesse asks for current spot, X_aggressive, P(touch BE), or any
+> live metric: tell him the snapshot is stale and ask him to run `sndk`
+> for fresh data.** DO NOT paste these as the answer.
+>
+> The ONLY legitimate uses of the values below are:
+> - Anchoring the original design context (what the tool produced at lock)
+> - Sanity-checking that a NEW run hasn't broken (e.g., if a fresh run
+>   shows X_aggressive at $2,500 with no news, something's wrong)
+> - Verifying that you (new Claude) understand the magnitudes involved
+
+Snapshot values (2026-05-17, NOT live — re-run for current):
 
 - **Spot:** $1,407.61 (Friday May 15 close)
 - **Sigma blended:** ~97%
 - **Drift blended (Bayesian posterior):** ~+22%
 - **X_safe:** $1,680
-- **X_aggressive:** $1,700 (recommended sell-limit)
+- **X_aggressive:** $1,700 (recommended sell-limit at lock time)
 - **Verdict:** HOLD
 - **Profit if X_aggressive hit:** +$2,100 (10 × $210)
 - **P(touch BE):** ~89%
@@ -479,7 +496,7 @@ the SNDK trade itself. Don't volunteer to do this unless asked.
 ## Document maintenance
 
 - **Created:** 2026-05-17
-- **Last updated:** 2026-05-17 (initial creation, locking v4 design + branch-isolation guardrails)
+- **Last updated:** 2026-05-17 (Section 9 stale-data warning prominence increased after lossless-migration test Q16 showed snapshot values could be quoted as "current" without enough caveat)
 - **Authoritative commit at creation:** `6b5e0df`
 - **Future updates:** append change log entries below
 
