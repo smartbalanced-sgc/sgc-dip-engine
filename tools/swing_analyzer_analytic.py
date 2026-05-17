@@ -816,18 +816,41 @@ def signal_from_analyst_targets(targets, S0, price_history_df=None,
         return _none_signal("analyst target parse error")
 
 
-def signal_from_sector(sector_perf):
+def signal_from_sector(sector_perf, swing_regime=None):
+    """§2026-05-17 audit P1.4: regime-gate the sector signal. Annualising a
+    30-day sector return is a momentum extrapolation, not a fundamental
+    estimator. In POST_PARABOLA / overbought regimes, this extrapolation
+    is most likely to over-fire (high-vol momentum days hit the +150% cap).
+    Lower cap and downgrade confidence when regime is parabolic.
+    """
     if not sector_perf or sector_perf.get("cum_return_pct") is None:
         return _none_signal("sector data unavailable")
     days = max(1, sector_perf.get("n_days", 30))
     cum = sector_perf["cum_return_pct"] / 100.0
     drift = (1 + cum) ** (252 / days) - 1.0
-    drift = max(-0.50, min(1.50, drift))
+
+    # Regime-aware cap + confidence
+    regime_name = swing_regime.get("regime") if swing_regime else None
+    if regime_name == "POST_PARABOLA":
+        # Sector momentum extrapolation is least trustworthy in parabolic regimes
+        cap_high, cap_low = 0.60, -0.50
+        conf = "LOW"
+        regime_note = " [POST_PARABOLA regime: sector cap reduced to +60%, conf LOW]"
+    elif regime_name in ("MOMENTUM_BULL", "MOMENTUM_BEAR"):
+        cap_high, cap_low = 1.00, -0.50
+        conf = "MEDIUM"
+        regime_note = f" [{regime_name}: cap +100%]"
+    else:
+        cap_high, cap_low = 1.50, -0.50
+        conf = "MEDIUM"
+        regime_note = ""
+
+    drift = max(cap_low, min(cap_high, drift))
     return {
-        "drift": float(drift), "confidence": "MEDIUM",
+        "drift": float(drift), "confidence": conf,
         "source_quality": "PRIMARY", "sources_count": 1,
         "notes": (f"{sector_perf.get('sector','?')} {cum*100:+.1f}% "
-                  f"last {days}d (annualised {drift*100:+.0f}%)"),
+                  f"last {days}d (annualised {drift*100:+.0f}%){regime_note}"),
     }
 
 
@@ -1544,12 +1567,14 @@ def mechanical_position_guidance(cushion, ev_advantage, dispersion_pp,
         if ci_lo68 < 0 and ci_hi68 > 0:
             mech = "TRIM"  # uncertain — don't commit to full cut
 
-    # Symmetric dispersion handling
+    # §2026-05-17 audit P1.6: dispersion downgrades HOLD to TRIM (signals
+    # disagree → less conviction to keep full size). The previous "symmetric"
+    # rule that also upgraded CUT to TRIM was cosmetic balance, not financial
+    # logic — when you're already underwater AND signals disagree, keeping
+    # half a losing position alive is NOT prudent. CUT stays CUT.
     if dispersion_pp >= 30:
         if mech == "HOLD":
             mech = "TRIM"  # signals disagree, scale back
-        elif mech == "CUT":
-            mech = "TRIM"  # signals disagree, don't fully exit
 
     agreement = (mech == ai_guidance) if ai_guidance else None
     return mech, agreement
@@ -1702,7 +1727,7 @@ def check_thesis_mode(args):
         "analyst":    signal_from_analyst_targets(analyst_targets, S0,
                                                    price_history_df=df,
                                                    summary=analyst_summary),
-        "sector":     signal_from_sector(sector_perf),
+        "sector":     signal_from_sector(sector_perf, swing_regime=regime),
         "macro":      signal_from_macro(macro),
         "insider":    signal_from_insider(insider, market_cap_usd=market_cap_usd),
     }
@@ -1737,7 +1762,7 @@ def check_thesis_mode(args):
                  "weights": {"historical": 1.0}, "fallback": True,
                  "dispersion_pp": 0.0, "n_active": 1}
     else:
-        mu_for_decision = blend["blended"]
+        mu_today_blend = blend["blended"]
 
     # === BAYESIAN UPDATE FROM PRIOR (Tier 1 #9) ===
     history_dir = Path(__file__).parent / "output"
@@ -1745,6 +1770,19 @@ def check_thesis_mode(args):
     history_path = history_dir / f"thesis_history_{ticker}.csv"
     prior_blend, prior_age = load_prior_blend(history_path, days_back_limit=3)
     bayesian = bayesian_update(prior_blend, blend, prior_age_days=prior_age or 1)
+
+    # §2026-05-17 audit P0.2: use Bayesian posterior for verdict when a
+    # valid prior exists (smoother, respects accumulated evidence rather
+    # than single-day noise). Today's blend goes into the sensitivity table.
+    if (bayesian and bayesian.get("posterior_mu") is not None
+            and prior_blend is not None):
+        mu_for_decision = bayesian["posterior_mu"]
+        decision_basis = (f"Bayesian posterior "
+                          f"({bayesian['prior_weight']*100:.0f}% prior + "
+                          f"{bayesian['obs_weight']*100:.0f}% today)")
+    else:
+        mu_for_decision = blend["blended"]
+        decision_basis = "today's blend (no prior available)"
 
     # === HYSTERESIS CHECK (Tier 0 #6) ===
     # We compute today's verdict first, then check against prior
@@ -1893,9 +1931,19 @@ def check_thesis_mode(args):
     print(f"  Effective weights:                   {weights_str}")
     print(f"  Signal dispersion (range):           "
           f"{blend['dispersion_pp']:.1f}pp")
-    if blend['dispersion_pp'] >= 30:
-        print(f"  WARNING: signals disagree significantly (>30pp). "
-              f"Treat blend with caution.")
+    # §audit P1.5: graduated dispersion warnings — different action thresholds
+    disp = blend['dispersion_pp']
+    if disp >= 100:
+        print(f"  DISPERSION FLAG: >=100pp -- blend is NOT a defensible point")
+        print(f"  estimate. Signals span more than a full percentage point of")
+        print(f"  drift. Decide based on the signal you trust most, not the blend.")
+    elif disp >= 60:
+        print(f"  DISPERSION FLAG: 60-100pp -- treat blended drift as NOISE,")
+        print(f"  not a coherent estimate. Look at individual signals separately.")
+    elif disp >= 30:
+        print(f"  DISPERSION FLAG: 30-60pp -- signals disagree meaningfully.")
+        print(f"  Blend is directionally useful but cushion CI bounds matter more")
+        print(f"  than the point estimate.")
     print()
 
     # ---- BAYESIAN UPDATE (NEW Tier 1 #9) ----
@@ -1979,7 +2027,10 @@ def check_thesis_mode(args):
         print()
 
     # ---- HEADLINE METRIC ----
-    print_header("HEADLINE METRIC (using blended forward drift)")
+    # §audit P0.2: surface which drift drove the verdict
+    print_header(f"HEADLINE METRIC — verdict driven by {decision_basis}")
+    print(f"  Drift used for verdict:            "
+          f"{mu_for_decision*100:+.1f}%/yr")
     print(f"  P(touch ${args.target:.0f} within {args.horizon}d): "
           f"{p_touch_mc*100:5.1f}%  (MC, 50k paths)")
     print(f"  P (closed-form cross-check):       "
@@ -2001,6 +2052,65 @@ def check_thesis_mode(args):
           f"(probability {p_touch_mc*100:.1f}%)")
     print(f"  If target missed:     ${pnl_bad:+,.0f}  "
           f"(avg, probability {(1-p_touch_mc)*100:.1f}%)")
+    print()
+
+    # ---- §audit P0.1: DUAL-TARGET ANALYSIS ----
+    # The primary target above is whatever args.target the user passed.
+    # Also compute the BE-recovery scenario (target = entry) so the user
+    # sees BOTH the profit-target and break-even lenses every run.
+    # Critical: BE-only exit has different math because pnl_good = $0,
+    # which changes the break-even P* dramatically.
+    if abs(args.target - args.entry) > 1.0:  # only run if target != entry
+        print_header("DUAL-TARGET ANALYSIS  (BE vs profit, same drift)")
+        print(f"  Compares the verdict at TWO sell-limit levels using the")
+        print(f"  same blended drift ({mu_for_decision*100:+.1f}%/yr). The math")
+        print(f"  changes because each sell-limit has different winning payoff.")
+        print()
+        # Primary target run (already computed above)
+        verdict_primary = verdict
+        # Secondary: BE exit at entry price
+        be_target = args.entry
+        be_p, be_ev, be_p_star, be_cushion, be_verdict = _quick_scenario(
+            S0, sigma, mu_for_decision, args.horizon, be_target, args.entry,
+            args.shares, cut_pnl, 0.0)  # pnl_good for BE is exactly $0
+        # NB: _quick_scenario takes pnl_good as a param; for BE pnl_good = 0
+        print(f"  {'Scenario':<42}{'P(touch)':>10}{'EV(hold)':>11}"
+              f"{'Cushion':>9}{'Verdict':>14}")
+        print(f"  {'-'*42}{'-'*10}{'-'*11}{'-'*9}{'-'*14}")
+        # Profit target row (primary)
+        print(f"  {'Profit target $%d (primary)' % args.target:<42}"
+              f"{p_touch_mc*100:>9.1f}% ${ev_hold:>+9,.0f}"
+              f"{cushion_pp:>+7.1f}pp{verdict_primary:>14}")
+        # BE row
+        print(f"  {'Break-even $%d (target=entry)' % be_target:<42}"
+              f"{be_p*100:>9.1f}% ${be_ev:>+9,.0f}"
+              f"{be_cushion*100:>+7.1f}pp{be_verdict:>14}")
+        print()
+        if be_verdict != verdict_primary:
+            print(f"  WARNING: BE-target verdict ({be_verdict}) differs from")
+            print(f"  profit-target verdict ({verdict_primary}). If your actual")
+            print(f"  exit objective is break-even recovery, trust the BE row.")
+            print(f"  Setting a sell-limit at $%d caps your upside at $0 while" % be_target)
+            print(f"  keeping the same tail risk — mathematically inferior to")
+            print(f"  a $%d profit limit (or cutting now)." % args.target)
+        else:
+            print(f"  BE-target and profit-target verdicts AGREE on {verdict}.")
+        print()
+
+    # ---- §audit P0.3: FRESH-CAPITAL FRAMING ----
+    print_header("FRESH-CAPITAL FRAMING (sunk-cost check)")
+    if mu_for_decision > 0:
+        prob_str = f"{p_touch_mc*100:.0f}% chance"
+    else:
+        prob_str = f"{p_touch_mc*100:.0f}% chance"
+    print(f"  Holding {args.shares} shares @ ${args.entry:.0f} cost basis is")
+    print(f"  mathematically equivalent to BUYING {args.shares} shares at")
+    print(f"  spot ${S0:.2f} today, targeting ${args.target:.0f} in "
+          f"{args.horizon} days.")
+    print()
+    print(f"  Would you take this trade with FRESH capital? If no, the only")
+    print(f"  reason holding feels different is the $1490 cost-basis anchor.")
+    print(f"  Math doesn't care about your cost basis — only forward P&L.")
     print()
 
     # ---- PATH-DEPENDENT RISK METRICS (NEW Tier 1 #13) ----
