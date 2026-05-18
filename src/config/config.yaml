@@ -52,6 +52,13 @@ portfolio:
     - AMAT
     - ANET
     - FIX
+    - RKLB
+    - ASTS
+    - IRDM
+    - SATS
+    - NOK
+    - GLW
+    - MSA
 
   # Portfolio weights (Constitution v7)
   # Used for display and future weighted correlation
