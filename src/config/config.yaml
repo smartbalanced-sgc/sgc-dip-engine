@@ -59,6 +59,9 @@ portfolio:
     - NOK
     - GLW
     - MSA
+    - DELL
+    - ETN
+    - AMKR
 
   # Portfolio weights (Constitution v7)
   # Used for display and future weighted correlation
