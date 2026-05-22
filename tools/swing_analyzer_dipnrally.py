@@ -510,9 +510,13 @@ def analyze_joint_conditional(
     dip_any = dip_first_day < n_days
     rally_any = rally_first_day < n_days
 
-    # Scenario classification
-    round_trip = (dip_first_day < rally_first_day) & rally_any
-    rally_first = (rally_first_day < dip_first_day) & rally_any
+    # 4-way partition (mutually exclusive, exhaustive). Same-day first-touch
+    # (dip AND rally touched on the same day, possible at high σ with bridge
+    # correction) is classified as rally_first — conservative, doesn't
+    # overstate round-trip probability when intraday order is ambiguous.
+    both_touched = dip_any & rally_any
+    round_trip = both_touched & (dip_first_day < rally_first_day)
+    rally_first = (rally_any & ~dip_any) | (both_touched & (rally_first_day <= dip_first_day))
     bag_hold = dip_any & ~rally_any
     neither = ~dip_any & ~rally_any
 
