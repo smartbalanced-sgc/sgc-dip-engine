@@ -167,10 +167,10 @@ Before EVERY commit:
 - `ANTHROPIC_API_KEY`
 - `EULERPOOL_TOKEN`
 
-### Current Portfolio (49 tickers as of 2026-05-19)
-**Modeled (~48):** NVDA, MSFT, GOOGL, META, AMZN, MA, WM, MU, ASML, AVGO, CTAS, VST, CEG, LDO.MI, TSLA, INOD, ADP, LLY, LIN, WMT, PLTR, AMD, INTC, SNDK, ENGN, AIIO, GDC, FWRD, HUBS, CRWD, CSCO, SNAL, ALP, QUCY, IONQ, AMAT, ANET, FIX, RKLB, ASTS, IRDM, SATS, NOK, GLW, MSA, DELL, ETN, AMKR
+### Current Portfolio (44 tickers as of 2026-05-20)
+**Modeled (~44):** NVDA, MSFT, GOOGL, META, AMZN, MA, WM, MU, ASML, AVGO, CTAS, VST, CEG, LDO.MI, TSLA, INOD, ADP, LLY, LIN, WMT, PLTR, AMD, INTC, SNDK, FWRD, HUBS, CRWD, CSCO, ALP, QUCY, IONQ, AMAT, ANET, FIX, RKLB, ASTS, IRDM, SATS, NOK, GLW, MSA, DELL, ETN, AMKR
 
-**Skipped (1 — FMP plan limitation):** IGLN.L
+**Skipped (0):** —
 
 > Note on "Modeled (~36)": exact runtime count varies. Volatility-gate exclusions
 > typically remove 4-6 small caps each run (recent excludes: ENGN, INOD, GDC,
