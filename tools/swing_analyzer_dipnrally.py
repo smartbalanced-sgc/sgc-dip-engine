@@ -388,12 +388,83 @@ def run_mc_joint_conditional(
     return paths[:, 1:]  # drop initial column
 
 
+def precompute_first_touch_days(
+    paths: np.ndarray,
+    S0: float,
+    barriers: np.ndarray,
+    sigma: float,
+    vol_schedule: Optional[np.ndarray],
+    direction: str,
+    seed: int = 42,
+) -> np.ndarray:
+    """For each barrier, return first-touch day per path with Brownian bridge correction.
+
+    Returns array of shape (n_paths, n_barriers): first-touch day index for each path
+    and each barrier (n_days sentinel if never touched within horizon).
+
+    Bridge math: for arithmetic Brownian motion in log-space with daily vol σ_d,
+        P(min log S(τ) < log B, τ ∈ [t,t+1] | log S(t)=x, log S(t+1)=y)
+            = exp(-2 (x - log B)(y - log B) / σ_d²)  when both x > log B, y > log B
+    Symmetric for upper barrier. This corrects the ~13pp discrete-time MC bias
+    versus continuous-time PDE/closed-form at high vol (observed at SNDK σ=98%).
+
+    Vectorised across paths × days for each barrier; loops over barriers
+    (one barrier at a time keeps memory under 100k × 60 × 8 = 48 MB per pass).
+    """
+    n_paths, n_days = paths.shape
+    n_barriers = len(barriers)
+    result = np.full((n_paths, n_barriers), n_days, dtype=np.int32)
+
+    prev = np.concatenate([np.full((n_paths, 1), S0), paths[:, :-1]], axis=1)
+    log_prev = np.log(prev)
+    log_curr = np.log(paths)
+
+    if vol_schedule is not None:
+        sigma_d_sq = (vol_schedule.astype(float) ** 2) / 252.0
+    else:
+        sigma_d_sq = np.full(n_days, (sigma ** 2) / 252.0)
+    sigma_d_sq = np.maximum(sigma_d_sq, 1e-12)
+
+    rng = np.random.default_rng(seed=seed)
+
+    for i, B in enumerate(barriers):
+        log_B = float(np.log(B))
+        if direction == "down":
+            close_touch = paths <= B
+            both_safe = (log_prev > log_B) & (log_curr > log_B)
+            dx = log_prev - log_B
+            dy = log_curr - log_B
+        else:  # "up"
+            close_touch = paths >= B
+            both_safe = (log_prev < log_B) & (log_curr < log_B)
+            dx = log_B - log_prev
+            dy = log_B - log_curr
+
+        with np.errstate(divide="ignore", invalid="ignore"):
+            exponent = -2.0 * dx * dy / sigma_d_sq[np.newaxis, :]
+        # Bridge touch probability, zero where endpoints already crossed
+        p_touch_bridge = np.where(both_safe, np.exp(exponent), 0.0)
+        # Sample Bernoulli per (path, day)
+        u = rng.random(p_touch_bridge.shape)
+        bridge_touch = (u < p_touch_bridge) & both_safe
+        touch_mask = close_touch | bridge_touch
+        touch_any = touch_mask.any(axis=1)
+        first_day = np.where(touch_any, touch_mask.argmax(axis=1), n_days)
+        result[:, i] = first_day
+
+    return result
+
+
 def analyze_joint_conditional(
     paths: np.ndarray,
     S0: float,
     dip_price: float,
     rally_price: float,
     horizon_days: int,
+    sigma: Optional[float] = None,
+    vol_schedule: Optional[np.ndarray] = None,
+    dip_first_days: Optional[np.ndarray] = None,
+    rally_first_days: Optional[np.ndarray] = None,
 ) -> dict:
     """
     Core v2 logic: for each MC path, track whether dip and rally were touched
@@ -406,33 +477,45 @@ def analyze_joint_conditional(
       D. neither: path never touched either barrier
 
     All four sum to 1.0.
+
+    When sigma is provided, applies Brownian bridge correction so first-passage
+    probabilities match continuous-time PDE/closed-form within MC sample noise.
     """
     n_paths, n_days = paths.shape
 
-    # Day-of-first-touch for each barrier per path (n_days if never touched)
-    # Using argmax of boolean comparison — argmax of all-zeros is 0, so guard
-    # by checking whether ANY day matched.
-    dip_mask = paths <= dip_price       # True wherever path touched dip
-    rally_mask = paths >= rally_price   # True wherever path touched rally
+    # Three ways to get first-touch days, in preference order:
+    #   1. Caller passed precomputed first-touch arrays (fast path for grid scan)
+    #   2. Sigma provided: apply Brownian bridge correction (matches PDE/closed-form)
+    #   3. Neither: daily-close only (biased ~13pp at SNDK σ but cheap)
+    if dip_first_days is not None and rally_first_days is not None:
+        dip_first_day = dip_first_days
+        rally_first_day = rally_first_days
+    elif sigma is not None:
+        dip_arr = precompute_first_touch_days(
+            paths, S0, np.array([dip_price]), sigma, vol_schedule, "down"
+        )
+        rally_arr = precompute_first_touch_days(
+            paths, S0, np.array([rally_price]), sigma, vol_schedule, "up", seed=43
+        )
+        dip_first_day = dip_arr[:, 0]
+        rally_first_day = rally_arr[:, 0]
+    else:
+        dip_mask = paths <= dip_price
+        rally_mask = paths >= rally_price
+        dip_any_local = dip_mask.any(axis=1)
+        rally_any_local = rally_mask.any(axis=1)
+        dip_first_day = np.where(dip_any_local, dip_mask.argmax(axis=1), n_days)
+        rally_first_day = np.where(rally_any_local, rally_mask.argmax(axis=1), n_days)
 
-    dip_any = dip_mask.any(axis=1)
-    rally_any = rally_mask.any(axis=1)
-
-    # First-touch day index (or n_days sentinel if not touched)
-    dip_first_day = np.where(dip_any, dip_mask.argmax(axis=1), n_days)
-    rally_first_day = np.where(rally_any, rally_mask.argmax(axis=1), n_days)
+    dip_any = dip_first_day < n_days
+    rally_any = rally_first_day < n_days
 
     # Scenario classification
-    # A: round_trip — dip first AND rally after dip
     round_trip = (dip_first_day < rally_first_day) & rally_any
-    # C: rally first — rally_first_day strictly less than dip_first_day
     rally_first = (rally_first_day < dip_first_day) & rally_any
-    # B: bag_hold — dip touched but rally never touched
     bag_hold = dip_any & ~rally_any
-    # D: neither
     neither = ~dip_any & ~rally_any
 
-    # Sanity: counts must sum to n_paths
     total = round_trip.sum() + rally_first.sum() + bag_hold.sum() + neither.sum()
     assert total == n_paths, f"scenario partition error: {total} != {n_paths}"
 
@@ -441,14 +524,18 @@ def analyze_joint_conditional(
     n_bag_hold = int(bag_hold.sum())
     n_neither = int(neither.sum())
 
-    # Conditional probabilities (guard against zero division)
-    p_dip_touched = float((n_round_trip + n_bag_hold) / n_paths)
+    # Conditional probabilities
+    # p_dip_touched_first: paths where dip touched BEFORE rally (used for trade trigger)
+    # p_dip_touched_any: paths where dip touched at ANY point (used for cross-check vs closed-form)
+    p_dip_touched_first = float((n_round_trip + n_bag_hold) / n_paths)
+    p_dip_touched_any = float(dip_any.sum() / n_paths)
+    p_rally_touched_any = float(rally_any.sum() / n_paths)
     p_rally_given_dip = (
         float(n_round_trip / (n_round_trip + n_bag_hold))
         if (n_round_trip + n_bag_hold) > 0 else 0.0
     )
 
-    # Expected days conditional on each scenario
+    # Expected days conditional on round-trip completion
     if n_round_trip > 0:
         rt_dip_days = dip_first_day[round_trip]
         rt_rally_days = rally_first_day[round_trip]
@@ -471,7 +558,11 @@ def analyze_joint_conditional(
         "p_bag_hold": n_bag_hold / n_paths,
         "p_no_trade_rally_first": n_rally_first / n_paths,
         "p_neither": n_neither / n_paths,
-        "p_dip_touched_marginal": p_dip_touched,
+        # First-passage: dip BEFORE rally (used by trade-trigger logic)
+        "p_dip_touched_marginal": p_dip_touched_first,
+        # Marginal "ever touched" (used for cross-check vs closed-form)
+        "p_dip_touched_any": p_dip_touched_any,
+        "p_rally_touched_any": p_rally_touched_any,
         "p_rally_given_dip_conditional": p_rally_given_dip,
         "expected_days_to_dip": exp_days_to_dip,
         "expected_days_dip_to_rally": exp_days_dip_to_rally,
@@ -506,13 +597,13 @@ def three_method_cross_check(
     p_touch_dip_closed = closed_touch_down(S0, dip_price, T_years, mu, sigma)
     p_touch_rally_closed = closed_touch_up(S0, rally_price, T_years, mu, sigma)
 
-    # MC's analogous values
-    # MC dip-first = bag_hold + round_trip (any path where dip touched at some point AND dip touched before rally)
+    # MC's analogous values — use the CORRECT quantity for each row
     p_dip_first_mc = mc_result["p_bag_hold"] + mc_result["p_round_trip"]
     p_rally_first_mc = mc_result["p_no_trade_rally_first"]
-    p_touch_dip_marginal_mc = mc_result["p_dip_touched_marginal"]
-    # Marginal rally touch = rally_first + round_trip (path eventually touched rally)
-    p_touch_rally_marginal_mc = mc_result["p_no_trade_rally_first"] + mc_result["p_round_trip"]
+    # For "ever touched" rows, use the bridge-corrected ANY mask, not first-passage
+    p_touch_dip_marginal_mc = mc_result.get("p_dip_touched_any", p_dip_first_mc)
+    p_touch_rally_marginal_mc = mc_result.get("p_rally_touched_any",
+                                               mc_result["p_no_trade_rally_first"] + mc_result["p_round_trip"])
 
     # Disagreement flags
     flags = []
@@ -649,64 +740,36 @@ def build_ai_pass1_prompt(
         if self_earnings_date else "unknown"
     )
 
-    return f"""You are analysing {ticker} for a 60-day round-trip swing trade.
-Today is {today}. Spot = ${snapshot.spot:.2f}.
+    return f"""Analyse {ticker} for a 60-day round-trip swing trade.
+Today: {today}. Spot: ${snapshot.spot:.2f}. Sector: {snapshot.sector}.
+σ blended: {vol_profile.blended_sigma:.1%}. RSI: {snapshot.rsi:.1f}. 30d mom: {snapshot.mom_30d:+.1%}. YTD: {snapshot.ytd_return:+.1%}.
+Next own earnings: {earnings_str}. Peers: {', '.join(peer_tickers)}.
 
-CONTEXT:
-- Sector: {snapshot.sector} / {snapshot.industry}
-- Market cap: ${snapshot.market_cap / 1e9:.1f}B
-- σ blended: {vol_profile.blended_sigma:.1%} (EXTREME if >80%)
-- RSI: {snapshot.rsi:.1f}
-- 30d mom: {snapshot.mom_30d:+.1%}
-- YTD: {snapshot.ytd_return:+.1%}
-- Next own earnings: {earnings_str}
-- Peers: {', '.join(peer_tickers)}
-
-BASE SIGNAL BLEND (math-derived, your estimate becomes one of many):
+Base signal blend (math-derived):
 {base_signal_summary}
 
-YOUR JOB — return STRUCTURED JSON with these exact keys:
+OUTPUT — single JSON object. NO PROSE BEFORE OR AFTER. NO MARKDOWN FENCES. STRINGS MUST NOT CONTAIN UNESCAPED NEWLINES. Keep each string < 250 chars.
 
 {{
-  "drift_estimate_annualized": <float, decimal e.g. 0.20 for 20%/yr>,
-  "drift_range_low_high": [<float>, <float>],
-  "confidence": "LOW" | "MEDIUM" | "HIGH",
-  "vol_regime": "HIGH" | "MEDIUM" | "LOW",
-  "narrative_score": "strong" | "neutral" | "weak",
-  "narrative_evidence": [
-    {{"claim": "...", "source": "...", "url_or_publication": "..."}},
-    ...
-  ],
-  "catalysts": [
-    {{
-      "name": "...",
-      "type": "earnings|industry|macro|product|other",
-      "date_or_window": "YYYY-MM-DD or 'next 30d'",
-      "magnitude": "low|med|high",
-      "direction_risk": "bullish|bearish|two-sided",
-      "sources": ["url1", "url2"]
-    }},
-    ... (MINIMUM 5 catalysts, each MINIMUM 2 sources)
-  ],
-  "bull_factors": [
-    {{"factor": "...", "weight": "high|med|low", "sources": ["url1", "url2"]}},
-    ...
-  ],
-  "bear_factors": [
-    {{"factor": "...", "weight": "high|med|low", "sources": ["url1", "url2"]}},
-    ...
-  ],
-  "key_risks": ["risk 1", "risk 2", "risk 3"]
+"drift_estimate_annualized": 0.20,
+"drift_range_low_high": [-0.20, 0.50],
+"confidence": "MEDIUM",
+"vol_regime": "MEDIUM",
+"narrative_score": "neutral",
+"narrative_evidence": [{{"claim": "short", "source": "publisher"}}],
+"catalysts": [{{"name": "short name", "type": "earnings", "date_or_window": "YYYY-MM-DD", "magnitude": "med", "direction_risk": "two-sided", "sources": ["src1", "src2"]}}],
+"bull_factors": [{{"factor": "concise factor", "weight": "med", "sources": ["src1", "src2"]}}],
+"bear_factors": [{{"factor": "concise factor", "weight": "med", "sources": ["src1", "src2"]}}],
+"key_risks": ["short risk 1", "short risk 2"]
 }}
 
-CONSTRAINTS:
-- vol_regime: HIGH if you expect post-event vol expansion vs current σ; LOW if
-  vol-collapse signal (post-beat de-risk); MEDIUM if no signal.
-- narrative_score: "strong" REQUIRES ≥2 cited sources defending the multi-quarter
-  story (e.g., specific tech moat, contracted backlog). Without evidence, return "neutral".
-- Each catalyst MUST have ≥2 distinct sources. List ≥5 plausible candidates.
-- Do not converge on a single cause without explicit comparative reasoning.
-- Return ONLY valid JSON. No markdown, no commentary outside JSON.
+RULES:
+- vol_regime: HIGH if post-event vol expansion expected; LOW if vol-collapse signal; MEDIUM otherwise.
+- narrative_score: "strong" only if ≥2 sources defend a structural multi-quarter story; else "neutral".
+- catalysts: list 3-5 candidates, each with ≥2 sources. Concise names.
+- bull_factors and bear_factors: each list 2-4 items, concise (<200 chars).
+- key_risks: 2-3 risks, one short sentence each.
+- Return ONLY the JSON object. No preamble. No explanation. No markdown.
 """
 
 
@@ -967,6 +1030,45 @@ def _factor_weight(f) -> str:
     return "low"  # strings don't carry weight metadata
 
 
+def compute_unusual_move_z(
+    history_df: pd.DataFrame,
+    beta: Optional[float] = 1.0,
+    lookback: int = 60,
+) -> Optional[dict]:
+    """Beta-adjusted residual Z-score for today's return (pattern from
+    src/sentiment.py:130-186, detect_catalysts trigger B/C).
+
+    A |Z| >= CATALYST_Z_THRESHOLD (3.0 for high-vol names) signals an unusual
+    move that may have a hidden catalyst. Used for situational awareness in
+    the report, not yet as a numeric drift signal (would need backtest data
+    to calibrate weight).
+
+    Returns dict {z_score, return_pct, beta, triggered} or None if insufficient data.
+    """
+    if history_df is None or "Close" not in history_df.columns or len(history_df) < lookback + 1:
+        return None
+    try:
+        closes = history_df["Close"].astype(float).values
+        returns_ = np.diff(np.log(closes))
+        if len(returns_) < lookback:
+            return None
+        today_return = float(returns_[-1])
+        historical_vol = float(np.std(returns_[-lookback:]))
+        if historical_vol <= 0:
+            return None
+        beta_safe = max(0.5, float(beta or 1.0))
+        raw_z = abs(today_return) / historical_vol
+        adjusted_z = raw_z / beta_safe
+        return {
+            "z_score": round(adjusted_z, 2),
+            "return_pct": round(today_return * 100, 2),
+            "beta": round(beta_safe, 2),
+            "triggered": adjusted_z >= CATALYST_Z_THRESHOLD,
+        }
+    except Exception:
+        return None
+
+
 def apply_bull_bear_arithmetic(
     bull_factors: list, bear_factors: list
 ) -> tuple[float, str]:
@@ -995,43 +1097,62 @@ def scan_dip_rally_grid(
     conviction_rally_cond: float,
     capital_usd: float = 10000.0,
     spread_per_share_round_trip: float = 2.0,
-) -> tuple[Optional[JointConditionalResult], list[JointConditionalResult]]:
-    """Scan the (dip × rally) grid, return best pair meeting thresholds + all candidates.
+    vol_schedule: Optional[np.ndarray] = None,
+) -> tuple[Optional[JointConditionalResult], list[JointConditionalResult], bool]:
+    """Scan the (dip × rally) grid with Brownian bridge correction.
 
-    Best = highest net_expected_value subject to:
-      - p_dip_touched_marginal >= conviction_dip
-      - p_rally_given_dip_conditional >= conviction_rally_cond
+    Returns: (best, candidates, met_threshold_strict).
+      best: highest net_expected_value pair (qualified if any, else fallback)
+      candidates: all pairs evaluated
+      met_threshold_strict: True if `best` strictly met both conviction thresholds;
+                            False if `best` is a sub-threshold fallback
     """
+    n_paths, n_days = paths.shape
     dip_min = S0 * (1.0 - DIP_GRID_MAX_DEPTH_PCT)
-    dip_max = S0 * 0.99  # just below spot
+    dip_max = S0 * 0.99
     rally_min = S0 * 1.01
     rally_max = S0 * (1.0 + RALLY_GRID_MAX_REACH_PCT)
 
     dip_grid = np.arange(dip_min, dip_max, DIP_GRID_STEP)
     rally_grid = np.arange(rally_min, rally_max, RALLY_GRID_STEP)
 
-    candidates: list[JointConditionalResult] = []
+    # ---- Precompute bridge-corrected first-touch days ONCE per barrier ----
+    # This is the performance trick: rather than running bridge correction
+    # inside each of ~5000 grid cells, we precompute (n_paths, n_barriers)
+    # arrays in two passes (one per direction), then look up per pair.
+    print(f"  Precomputing bridge-corrected first-touch days for {len(dip_grid)} dip × {len(rally_grid)} rally barriers...")
+    dip_first_days_all = precompute_first_touch_days(
+        paths, S0, dip_grid, sigma, vol_schedule, "down", seed=42,
+    )
+    rally_first_days_all = precompute_first_touch_days(
+        paths, S0, rally_grid, sigma, vol_schedule, "up", seed=43,
+    )
 
-    for dip in dip_grid:
-        for rally in rally_grid:
-            result = analyze_joint_conditional(paths, S0, dip, rally, horizon_days)
+    candidates: list[JointConditionalResult] = []
+    for i, dip in enumerate(dip_grid):
+        for j, rally in enumerate(rally_grid):
+            result = analyze_joint_conditional(
+                paths, S0, float(dip), float(rally), horizon_days,
+                dip_first_days=dip_first_days_all[:, i],
+                rally_first_days=rally_first_days_all[:, j],
+            )
 
             p_dip = result["p_dip_touched_marginal"]
             p_rally_cond = result["p_rally_given_dip_conditional"]
 
-            if p_dip < conviction_dip - 0.05:  # allow small slack for grid scan
+            # Wider pre-filter — keep candidates within 8pp of either threshold
+            # (we'll strictly re-filter after building EV)
+            if p_dip < conviction_dip - 0.08:
                 continue
-            if p_rally_cond < conviction_rally_cond - 0.05:
+            if p_rally_cond < conviction_rally_cond - 0.08:
                 continue
 
-            shares = capital_usd / dip
-            gain_per_share = rally - dip - spread_per_share_round_trip
-            bag_hold_loss_per_share = dip - result["bag_hold_terminal_median"]
+            shares = capital_usd / float(dip)
+            gain_per_share = float(rally) - float(dip) - spread_per_share_round_trip
+            bag_hold_loss_per_share = float(dip) - result["bag_hold_terminal_median"]
             net_ev_per_share = (
                 result["p_round_trip"] * gain_per_share
                 + result["p_bag_hold"] * (-bag_hold_loss_per_share)
-                + result["p_no_trade_rally_first"] * 0.0
-                + result["p_neither"] * 0.0
             )
             net_ev_total = net_ev_per_share * shares
 
@@ -1052,20 +1173,20 @@ def scan_dip_rally_grid(
             )
             candidates.append(jc)
 
-    # Filter to those meeting thresholds (strict)
     qualified = [
         c for c in candidates
         if c.p_dip_touched >= conviction_dip and c.p_rally_given_dip >= conviction_rally_cond
     ]
-    if not qualified:
-        # Fallback: relax slightly and return best
-        candidates.sort(key=lambda c: c.net_expected_value, reverse=True)
-        best = candidates[0] if candidates else None
-    else:
+    if qualified:
         qualified.sort(key=lambda c: c.net_expected_value, reverse=True)
         best = qualified[0]
+        met_threshold_strict = True
+    else:
+        candidates_sorted = sorted(candidates, key=lambda c: c.net_expected_value, reverse=True)
+        best = candidates_sorted[0] if candidates_sorted else None
+        met_threshold_strict = False
 
-    return best, candidates
+    return best, candidates, met_threshold_strict
 
 
 # =============================================================================
@@ -1203,7 +1324,12 @@ def append_history_row(history_path: Path, row: dict):
 
 
 def load_prior_posterior(history_path: Path) -> Optional[dict]:
-    """Load most-recent row's posterior drift for Bayesian smoothing."""
+    """Load most-recent row's posterior drift for Bayesian smoothing.
+
+    Returns None if last row is from today (same-day artifact prevention per
+    SNDK_SWING_TOOL.md §7 — re-running same day with same data would shrink
+    posterior std artificially).
+    """
     if not history_path.exists():
         return None
     try:
@@ -1212,10 +1338,25 @@ def load_prior_posterior(history_path: Path) -> Optional[dict]:
         if not rows:
             return None
         last = rows[-1]
+        last_date_str = last.get("date", "")
+        # Same-day guard: skip prior if last row is from today
+        try:
+            if last_date_str:
+                last_dt = datetime.strptime(last_date_str[:10], "%Y-%m-%d").date()
+                if last_dt == datetime.now().date():
+                    print(f"   Bayesian prior skipped: last row is from today ({last_date_str}); "
+                          f"same-day artifact prevention.")
+                    return None
+        except ValueError:
+            pass
+        # Skip if drift_posterior field is empty (e.g., row written without a best pair)
+        mu_raw = last.get("drift_posterior", "")
+        if mu_raw in (None, ""):
+            return None
         return {
-            "mu": float(last.get("drift_posterior", 0)),
-            "std": float(last.get("drift_posterior_std", 0.15)),
-            "date": last.get("date", ""),
+            "mu": float(mu_raw),
+            "std": float(last.get("drift_posterior_std") or 0.15),
+            "date": last_date_str,
         }
     except Exception:
         return None
@@ -1247,6 +1388,8 @@ def format_report(
     capital_usd: float,
     total_ai_cost: float,
     runtime_seconds: float,
+    met_threshold_strict: bool = True,
+    unusual_move: Optional[dict] = None,
 ) -> str:
     lines: list[str] = []
     lines.append(hr(f"SANDISK SWING TRADER ({V2_VERSION}) — {snapshot.timestamp:%Y-%m-%d %H:%M}"))
@@ -1263,6 +1406,12 @@ def format_report(
         lines.append("  No dip/rally pair meets the conviction thresholds at current spot/vol/drift.")
         lines.append("  Action: WAIT — re-run after next close.")
     else:
+        if not met_threshold_strict:
+            lines.append("  ⚠ BELOW THRESHOLD — no pair met dip ≥{:.0%} AND rally-cond ≥{:.0%}.".format(
+                conviction_dip, conviction_rally_cond))
+            lines.append("  ⚠ Showing best-by-EV fallback. DO NOT TRADE this pair without re-evaluating.")
+            lines.append("  ⚠ Action: WAIT for a higher-conviction setup OR adjust thresholds with --conviction-dip / --conviction-rally-cond.")
+            lines.append("")
         shares = capital_usd / best.dip_price
         lines.append(f"  Dip buy-limit:    ${best.dip_price:,.0f}  (P(touch within {horizon_days}d) = {best.p_dip_touched:.1%}, expected day {best.expected_days_to_dip:.0f})")
         lines.append(f"  Rally sell-limit: ${best.rally_price:,.0f}  (P(rally | dip touched) = {best.p_rally_given_dip:.1%}, expected day +{best.expected_days_dip_to_rally:.0f})")
@@ -1287,6 +1436,20 @@ def format_report(
         for flag in method_check["flags"]:
             lines.append(f"  ⚠ {flag}")
     lines.append(f"  PDE mass conservation: {method_check['pde_mass_conservation']:.5f} (should be ~1.0)")
+
+    # UNUSUAL MOVE Z-SCORE (situational awareness, not yet a blend signal)
+    if unusual_move:
+        lines.append(hr("UNUSUAL MOVE DETECTION (beta-adjusted Z-score)"))
+        z = unusual_move["z_score"]
+        ret_pct = unusual_move["return_pct"]
+        beta = unusual_move["beta"]
+        trigger = unusual_move["triggered"]
+        flag_str = "  ⚠ TRIGGERED — investigate possible hidden catalyst" if trigger else "  ✓ within normal range"
+        lines.append(f"  Today's return: {ret_pct:+.2f}%  |  beta: {beta:.2f}  |  Z (β-adj): {z:.2f}")
+        lines.append(f"  Threshold: |Z| ≥ {CATALYST_Z_THRESHOLD:.1f} for high-vol regime")
+        lines.append(flag_str)
+        if trigger:
+            lines.append("  (Pattern from src/sentiment.py — abnormal moves often precede / signal catalysts)")
 
     # SIGMA TRIANGULATION
     lines.append(hr("SIGMA TRIANGULATION (5 anchors)"))
@@ -1703,12 +1866,36 @@ def run_pipeline(args) -> int:
     rsi = compute_rsi_14(closes_series)
     mom_5d = float((closes[-1] / closes[-6] - 1.0)) if len(closes) > 5 else 0.0
     mom_30d = float((closes[-1] / closes[-31] - 1.0)) if len(closes) > 30 else 0.0
-    ytd_return = float((closes[-1] / closes[0] - 1.0))  # rough proxy
+    # YTD: find first close on or after Jan 1 of current year; fall back to oldest
+    # bar if Jan 1 is before history window. closes[0] would give 2-year return.
+    current_year = datetime.now().year
+    ytd_baseline = None
+    if "Date" in history_df.columns:
+        try:
+            jan1 = pd.Timestamp(year=current_year, month=1, day=1)
+            mask = history_df["Date"] >= jan1
+            if mask.any():
+                ytd_baseline = float(history_df.loc[mask, "Close"].iloc[0])
+        except Exception:
+            ytd_baseline = None
+    if ytd_baseline is None or ytd_baseline <= 0:
+        ytd_baseline = float(closes[0])
+    ytd_return = float(closes[-1] / ytd_baseline - 1.0)
 
-    profile = fetch_company_profile(ticker, api_key)
-    market_cap = float(profile.get("mktCap", 0.0)) if profile else 0.0
-    sector = profile.get("sector", "Unknown") if profile else "Unknown"
-    industry = profile.get("industry", "Unknown") if profile else "Unknown"
+    profile = fetch_company_profile(ticker, api_key) or {}
+    # FMP returns market cap under different field names depending on endpoint version;
+    # try each in order until one yields a positive value (matches v1 line 2122-2128 pattern)
+    market_cap = 0.0
+    for fname in ("mktCap", "marketCap", "mcap", "market_cap"):
+        try:
+            v = profile.get(fname)
+            if v and float(v) > 0:
+                market_cap = float(v)
+                break
+        except (TypeError, ValueError):
+            continue
+    sector = (profile.get("sector") or "Technology") if profile else "Technology"
+    industry = (profile.get("industry") or "Unknown") if profile else "Unknown"
 
     snapshot = MarketSnapshot(
         ticker=ticker, timestamp=datetime.now(), spot=spot,
@@ -1716,6 +1903,14 @@ def run_pipeline(args) -> int:
         rsi=rsi, mom_5d=mom_5d, mom_30d=mom_30d, ytd_return=ytd_return,
         price_history=history_df,
     )
+
+    # Beta-adjusted unusual-move Z-score (pattern from src/sentiment.py)
+    profile_beta = None
+    try:
+        profile_beta = float(profile.get("beta") or 1.0)
+    except (TypeError, ValueError):
+        profile_beta = 1.0
+    unusual_move = compute_unusual_move_z(history_df, beta=profile_beta, lookback=60)
 
     # --- 2. Volatility profile ---
     # v1 import behaviour: fit_garch_11(returns) returns SCALAR forecast variance
@@ -1807,6 +2002,7 @@ def run_pipeline(args) -> int:
 
     # --- 4. AI Pass 1 ---
     pass1 = None
+    pass1_cost_charged = 0.0
     if args.no_ai:
         print("AI Pass 1 skipped (--no-ai)")
     else:
@@ -1817,8 +2013,10 @@ def run_pipeline(args) -> int:
             ticker, snapshot, vol_profile, horizon_days, display_signals_for_prompt,
             self_earnings_dt, peer_tickers,
         )
-        pass1_raw, pass1_cost, pass1_sources = call_ai_pass(pass1_prompt, max_tokens=4000, pass_label="Pass 1")
+        pass1_raw, pass1_cost, pass1_sources = call_ai_pass(pass1_prompt, max_tokens=8000, pass_label="Pass 1")
         pass1 = parse_ai_pass1(pass1_raw, pass1_sources, pass1_cost) if pass1_raw else None
+        # Track Pass 1 cost separately so it surfaces even when parse fails (charged for input + web search)
+        pass1_cost_charged = pass1_cost
 
     # --- 5. AI-derived signals: catalyst proximity, structural narrative, factor arithmetic ---
     catalyst_mu, catalyst_conf, catalyst_rat = (0.0, "LOW", "no AI catalysts")
@@ -1937,14 +2135,15 @@ def run_pipeline(args) -> int:
         mean_reversion_anchor=spot * 0.95 if args.mean_reversion > 0 else None,
     )
 
-    # --- 11. Scan grid for best pair ---
-    print("Scanning dip × rally grid...")
-    best, all_candidates = scan_dip_rally_grid(
+    # --- 11. Scan grid for best pair (bridge-corrected) ---
+    print("Scanning dip × rally grid (Brownian bridge correction)...")
+    best, all_candidates, met_threshold_strict = scan_dip_rally_grid(
         S0=spot, sigma=effective_sigma, mu=post_mu, horizon_days=horizon_days,
         paths=paths,
         conviction_dip=conviction_dip,
         conviction_rally_cond=conviction_rally_cond,
         capital_usd=capital,
+        vol_schedule=vol_schedule,
     )
 
     # --- 12. AI Pass 2 (adversarial critique) ---
@@ -1954,8 +2153,14 @@ def run_pipeline(args) -> int:
     elif pass1 and best:
         print("AI Pass 2 (adversarial critique)...")
         # Compute marginal probs ONCE (cache to avoid duplicate MC analysis)
-        up_marginal = analyze_joint_conditional(paths, spot, spot*0.5, spot*1.1, horizon_days)
-        down_marginal = analyze_joint_conditional(paths, spot, spot*0.9, spot*1.5, horizon_days)
+        up_marginal = analyze_joint_conditional(
+            paths, spot, spot*0.5, spot*1.1, horizon_days,
+            sigma=effective_sigma, vol_schedule=vol_schedule,
+        )
+        down_marginal = analyze_joint_conditional(
+            paths, spot, spot*0.9, spot*1.5, horizon_days,
+            sigma=effective_sigma, vol_schedule=vol_schedule,
+        )
         mc_marginal_summary = {
             "p_up_10pct": f"{up_marginal['p_no_trade_rally_first'] + up_marginal['p_round_trip']:.0%}",
             "p_down_10pct": f"{down_marginal['p_dip_touched_marginal']:.0%}",
@@ -1965,7 +2170,7 @@ def run_pipeline(args) -> int:
             ticker, snapshot, pass1, mc_marginal_summary, sigma_summary,
             prior_v2["mu"] if prior_v2 else None,
         )
-        pass2_raw, pass2_cost, _ = call_ai_pass(pass2_prompt, max_tokens=1500, pass_label="Pass 2")
+        pass2_raw, pass2_cost, _ = call_ai_pass(pass2_prompt, max_tokens=3000, pass_label="Pass 2")
         if pass2_raw:
             pass2 = parse_ai_pass2(pass2_raw, pass1.drift_estimate, pass2_cost)
     else:
@@ -1980,23 +2185,27 @@ def run_pipeline(args) -> int:
             ticker, spot, best.dip_price, best.rally_price, pass1.catalysts, horizon_days,
         )
 
-    # --- 14. Three-method math cross-check ---
+    # --- 14. Three-method math cross-check (bridge-corrected MC) ---
     print("Three-method math cross-check...")
-    method_check = (
-        three_method_cross_check(
-            spot, effective_sigma, post_mu, horizon_days,
-            best.dip_price, best.rally_price,
-            analyze_joint_conditional(paths, spot, best.dip_price, best.rally_price, horizon_days),
+    if best:
+        bridge_best_result = analyze_joint_conditional(
+            paths, spot, best.dip_price, best.rally_price, horizon_days,
+            sigma=effective_sigma, vol_schedule=vol_schedule,
         )
-        if best else {"table": [], "flags": [], "agreement_status": "n/a — no pair found",
-                      "pde_mass_conservation": 1.0, "pde_p_neither": 0.0}
-    )
+        method_check = three_method_cross_check(
+            spot, effective_sigma, post_mu, horizon_days,
+            best.dip_price, best.rally_price, bridge_best_result,
+        )
+    else:
+        method_check = {"table": [], "flags": [], "agreement_status": "n/a — no pair found",
+                        "pde_mass_conservation": 1.0, "pde_p_neither": 0.0}
 
     # --- 15. Backtest layer ---
     backtest = run_backtest_layer(history_path, spot)
 
     # --- 16. Persist CSV row ---
-    total_ai_cost = (pass1.cost_usd if pass1 else 0) + (pass2.cost_usd if pass2 else 0) + catalyst_stress_cost
+    # Surface ALL incurred AI cost — including Pass 1 that paid for input/web-search but failed to parse
+    total_ai_cost = pass1_cost_charged + (pass2.cost_usd if pass2 else 0) + catalyst_stress_cost
     csv_row = {
         "date": datetime.now().strftime("%Y-%m-%d"),
         "spot": f"{spot:.2f}",
@@ -2034,6 +2243,8 @@ def run_pipeline(args) -> int:
         best, method_check, catalyst_stress_results, backtest,
         conviction_dip, conviction_rally_cond, horizon_days, capital,
         total_ai_cost, runtime,
+        met_threshold_strict=met_threshold_strict,
+        unusual_move=unusual_move,
     )
     print(report)
 
