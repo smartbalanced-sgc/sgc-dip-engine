@@ -187,6 +187,23 @@ BAG_HOLD_TERMINAL_ASSUMPTION = "median_terminal_dip_paths"  # alt: "dip_price"
 # Backtest gate — minimum samples before calibration claims are made
 BACKTEST_MIN_SAMPLES = 30
 
+# v2 blend weights — 10 signals (v1's 9 less "ai" reweighted + 2 new AI-derived)
+# Total = 1.00 approximately; blend_with_uncertainty normalises by quality gating.
+BLEND_WEIGHTS_V2 = {
+    "historical":          0.05,
+    "analyst":             0.15,
+    "sector":              0.04,
+    "macro":               0.07,
+    "insider":             0.02,
+    "short_interest":      0.02,
+    "peer_rs":             0.10,
+    "sector_decoupling":   0.10,
+    "ai":                  0.25,   # confidence-weighted via internal LOW halver
+    "catalyst_proximity":  0.10,   # NEW v2 signal
+    "narrative":           0.10,   # NEW v2 signal
+}
+
+
 # v3 review criteria — LOCKED at v2 ship, executed at 30 days of runtime data
 V3_REVIEW_CRITERIA = {
     "n_days_min": 30,
@@ -277,6 +294,37 @@ class JointConditionalResult:
     expected_gain_per_share: float
     expected_bag_hold_loss: float
     net_expected_value: float
+
+
+def _signals_dict_to_display_list(signals_dict: dict, weights: dict) -> list[DriftSignal]:
+    """Convert v1's signal dict format to v2's DriftSignal list for display only."""
+    pretty_names = {
+        "historical": "Historical (GARCH + enrichment)",
+        "analyst": "Analyst (price-target-summary)",
+        "sector": "Sector momentum",
+        "macro": "Macro regime (VIX/SPY)",
+        "insider": "Insider activity (90d, mcap-scaled)",
+        "short_interest": "Short interest (squeeze tail)",
+        "peer_rs": "Peer RS (MU+WDC, 60d)",
+        "sector_decoupling": "Sector decoupling (vs sector, 30d)",
+        "ai": "AI analyst (Pass 1, conf-weighted)",
+        "catalyst_proximity": "Catalyst proximity (AI-generated)",
+        "narrative": "Structural narrative score",
+    }
+    out: list[DriftSignal] = []
+    for name, info in signals_dict.items():
+        drift = info.get("drift")
+        if drift is None:
+            drift = 0.0
+        out.append(DriftSignal(
+            name=pretty_names.get(name, name),
+            mu_annual=float(drift),
+            confidence=str(info.get("confidence", "LOW")),
+            source_quality=str(info.get("source_quality", "PRIMARY")),
+            weight=float(weights.get(name, 0.0)),
+            rationale=str(info.get("notes", "")),
+        ))
+    return out
 
 
 # =============================================================================
@@ -1506,10 +1554,15 @@ def _make_history_trajectory_chart(history_rows: list[dict], spot_now: float, be
             ax.set_xticks([])
             ax.set_yticks([])
             return _matplotlib_to_b64(fig)
+        def _safe_float(v):
+            try:
+                return float(v) if v not in (None, "") else 0.0
+            except (TypeError, ValueError):
+                return 0.0
         dates = [r.get("date", "") for r in history_rows]
-        spots = [float(r.get("spot", 0)) for r in history_rows]
-        dips = [float(r.get("recommended_dip", 0)) for r in history_rows]
-        rallies = [float(r.get("recommended_rally", 0)) for r in history_rows]
+        spots = [_safe_float(r.get("spot", 0)) for r in history_rows]
+        dips = [_safe_float(r.get("recommended_dip", 0)) for r in history_rows]
+        rallies = [_safe_float(r.get("recommended_rally", 0)) for r in history_rows]
         fig, ax = plt.subplots(figsize=(10, 4))
         x = np.arange(len(dates))
         ax.plot(x, spots, color="#3b82f6", label="Spot", linewidth=2)
@@ -1619,12 +1672,14 @@ def run_pipeline(args) -> int:
     if history_df is None or history_df.empty:
         print(f"ERROR: failed to fetch history for {ticker}")
         return 1
-    spot = float(history_df["close"].iloc[-1])
-    closes = history_df["close"].values
-    returns = pd.Series(np.diff(np.log(closes)))
+    spot = float(history_df["Close"].iloc[-1])
+    closes_series = history_df["Close"]
+    closes = closes_series.values
+    # Log returns as pd.Series (v1's fit_garch_11 expects Series with .replace/.iloc)
+    returns = np.log(closes_series / closes_series.shift(1)).dropna()
 
-    # RSI + momentum
-    rsi = compute_rsi_14(closes)
+    # RSI + momentum — compute_rsi_14 expects pd.Series (uses .diff/.rolling)
+    rsi = compute_rsi_14(closes_series)
     mom_5d = float((closes[-1] / closes[-6] - 1.0)) if len(closes) > 5 else 0.0
     mom_30d = float((closes[-1] / closes[-31] - 1.0)) if len(closes) > 30 else 0.0
     ytd_return = float((closes[-1] / closes[0] - 1.0))  # rough proxy
@@ -1642,110 +1697,69 @@ def run_pipeline(args) -> int:
     )
 
     # --- 2. Volatility profile ---
+    # v1 import behaviour: fit_garch_11(returns) returns SCALAR forecast variance
+    # (NOT a dict with alpha/beta keys). GARCH α+β diagnostic deferred to v3 —
+    # would require refitting separately or importing src/garch_model.py (sacred).
     print("Computing volatility triangulation...")
-    garch = fit_garch_11(returns)
-    garch_sigma = float(np.sqrt(garch["forecast_variance"] * 252))
-    alpha_plus_beta = float(garch["alpha"] + garch["beta"])
+    forecast_var = fit_garch_11(returns)
+    if isinstance(forecast_var, (int, float)) and forecast_var > 0:
+        garch_sigma = float(np.sqrt(forecast_var * 252))
+    else:
+        garch_sigma = float(returns.tail(90).std() * np.sqrt(252)) if len(returns) >= 90 else 0.30
 
-    realized_dict = compute_realized_vol(returns)
+    realized_vol_dict = compute_realized_vol(returns, windows=(30, 60, 90))
     iv_data = fetch_options_iv(ticker, target_dte_days=horizon_days)
-    blended_sigma, anchors_count, divergence = triangulate_sigma(garch_sigma, realized_dict, iv_data)
+
+    # triangulate_sigma returns DICT {blended, anchors, n_anchors, divergence_pp}
+    sigma_triangle = triangulate_sigma(garch_sigma, realized_vol_dict, iv_data)
+    if sigma_triangle:
+        blended_sigma = sigma_triangle["blended"]
+        anchors_count = sigma_triangle["n_anchors"]
+        divergence_pp = sigma_triangle["divergence_pp"]
+    else:
+        blended_sigma = garch_sigma
+        anchors_count = 1
+        divergence_pp = 0.0
+
+    iv_value = (iv_data.get("iv") if iv_data and iv_data.get("is_liquid") else None)
+    iv_dte = (iv_data.get("dte") if iv_data else None)
 
     vol_profile = VolatilityProfile(
         garch_sigma=garch_sigma,
-        garch_alpha=float(garch["alpha"]),
-        garch_beta=float(garch["beta"]),
-        garch_alpha_plus_beta=alpha_plus_beta,
-        realized_30d=realized_dict.get(30, garch_sigma),
-        realized_60d=realized_dict.get(60, garch_sigma),
-        realized_90d=realized_dict.get(90, garch_sigma),
-        options_iv=iv_data.get("iv") if iv_data else None,
-        options_dte=iv_data.get("dte") if iv_data else None,
+        garch_alpha=0.0,           # deferred to v3 (would need separate fit)
+        garch_beta=0.0,
+        garch_alpha_plus_beta=0.0,
+        realized_30d=realized_vol_dict.get(30, garch_sigma),
+        realized_60d=realized_vol_dict.get(60, garch_sigma),
+        realized_90d=realized_vol_dict.get(90, garch_sigma),
+        options_iv=iv_value,
+        options_dte=iv_dte,
         blended_sigma=blended_sigma,
         anchors_count=anchors_count,
-        divergence_pp=divergence,
-        near_unit_root=alpha_plus_beta > 0.98,
+        divergence_pp=divergence_pp,
+        near_unit_root=False,      # deferred to v3 with α+β
     )
 
-    # --- 3. Base signal blend (v1's 9 signals, reused) ---
-    print("Computing 9 base drift signals...")
-    base_signals: list[DriftSignal] = []
+    # --- 3. Drift base + 8 signals (v1 dict pattern) ---
+    print("Computing 8 base drift signals (v1 import pattern)...")
+    DRIFT_CAP = 1.0  # matches v1's default --drift-cap
+    mu_hist = float(returns.mean() * 252)
+    mu_capped = max(-DRIFT_CAP, min(DRIFT_CAP, mu_hist))
+    enr = enrichment_drift(rsi, mom_5d)
+    mu_effective_historical = mu_capped + enr * 252 / horizon_days
 
-    # Historical
-    raw_mu_hist = float(garch.get("drift_unconstrained", 0.0))
-    mu_hist, mu_hist_raw = signal_from_historical(raw_mu_hist, raw_mu_hist, blended_sigma)
-    base_signals.append(DriftSignal(
-        name="Historical (GARCH + enrichment)",
-        mu_annual=mu_hist, confidence="LOW", source_quality="PRIMARY",
-        weight=0.05, rationale="GARCH-fit drift, capped"
-    ))
-
-    # Analyst targets
+    # Supplementary data
     targets = fetch_analyst_targets(ticker, api_key)
     summary = fetch_analyst_summary(ticker, api_key)
-    mu_an, conf_an, rat_an = signal_from_analyst_targets(targets, spot)
-    base_signals.append(DriftSignal(
-        name="Analyst (price-target-summary)",
-        mu_annual=mu_an, confidence=conf_an, source_quality="REPUTABLE",
-        weight=0.15, rationale=rat_an,
-    ))
-
-    # Sector
-    sector_perf = fetch_sector_perf(sector, api_key)
-    regime = detect_swing_regime(rsi, mom_5d, mom_30d, blended_sigma, ytd_return)
-    mu_sec, conf_sec, rat_sec = signal_from_sector(sector_perf, swing_regime=regime)
-    base_signals.append(DriftSignal(
-        name="Sector momentum",
-        mu_annual=mu_sec, confidence=conf_sec, source_quality="PRIMARY",
-        weight=0.04, rationale=rat_sec,
-    ))
-
-    # Macro
+    sector_perf = fetch_sector_perf(sector, api_key) if sector and sector != "Unknown" else None
+    regime = detect_swing_regime(rsi, mom_5d,
+                                  mom_30d * 100 if abs(mom_30d) < 5 else mom_30d,
+                                  blended_sigma, ytd_return * 100)
     macro = fetch_macro_indicators(api_key)
-    mu_mac, conf_mac, rat_mac = signal_from_macro(macro)
-    base_signals.append(DriftSignal(
-        name="Macro regime (VIX/SPY)",
-        mu_annual=mu_mac, confidence=conf_mac, source_quality="PRIMARY",
-        weight=0.07, rationale=rat_mac,
-    ))
-
-    # Insider
     insider = fetch_insider_activity(ticker, api_key)
-    mu_ins, conf_ins, rat_ins = signal_from_insider(insider, market_cap)
-    base_signals.append(DriftSignal(
-        name="Insider activity (90d, mcap-scaled)",
-        mu_annual=mu_ins, confidence=conf_ins, source_quality="PRIMARY",
-        weight=0.02, rationale=rat_ins,
-    ))
-
-    # Short interest
     short_data = fetch_short_interest(ticker, api_key)
-    mu_short, conf_short, rat_short = signal_from_short_interest(short_data)
-    base_signals.append(DriftSignal(
-        name="Short interest (squeeze tail)",
-        mu_annual=mu_short, confidence=conf_short, source_quality="PRIMARY",
-        weight=0.02, rationale=rat_short,
-    ))
-
-    # Peer RS
     peer_tickers = ["MU", "WDC"]
     peer_dfs = fetch_peer_history(peer_tickers, api_key, lookback_days=60)
-    mu_peer, conf_peer, rat_peer = signal_from_peer_rs(history_df, peer_dfs, lookback_days=60)
-    base_signals.append(DriftSignal(
-        name="Peer RS (MU+WDC, 60d)",
-        mu_annual=mu_peer, confidence=conf_peer, source_quality="PRIMARY",
-        weight=0.10, rationale=rat_peer,
-    ))
-
-    # Sector decoupling
-    mu_dec, conf_dec, rat_dec = signal_from_sector_decoupling(history_df, sector_perf)
-    base_signals.append(DriftSignal(
-        name="Sector decoupling (vs sector, 30d)",
-        mu_annual=mu_dec, confidence=conf_dec, source_quality="PRIMARY",
-        weight=0.10, rationale=rat_dec,
-    ))
-
-    # Earnings calendar
     self_earnings = fetch_next_earnings(ticker, api_key)
     self_earnings_dt = None
     if self_earnings:
@@ -1754,16 +1768,33 @@ def run_pipeline(args) -> int:
         except Exception:
             pass
 
+    # Build v1 signal dict (each signal_from_X returns dict with drift/confidence/etc.)
+    signals_dict = {
+        "historical": signal_from_historical(mu_effective_historical, mu_hist, blended_sigma),
+        "analyst": signal_from_analyst_targets(targets, spot,
+                                                price_history_df=history_df,
+                                                summary=summary),
+        "sector": signal_from_sector(sector_perf, swing_regime=regime),
+        "macro": signal_from_macro(macro),
+        "insider": signal_from_insider(insider, market_cap_usd=market_cap),
+        "short_interest": signal_from_short_interest(short_data),
+        "peer_rs": signal_from_peer_rs(history_df, peer_dfs, lookback_days=60),
+        "sector_decoupling": signal_from_sector_decoupling(history_df, sector_perf,
+                                                            lookback_days=30),
+    }
+
     # --- 4. AI Pass 1 ---
     print("AI Pass 1 (data gathering + multi-hypothesis catalysts)...")
+    # Build display-only signal list for prompt (uses v1 dict format)
+    display_signals_for_prompt = _signals_dict_to_display_list(signals_dict, BLEND_WEIGHTS_V2)
     pass1_prompt = build_ai_pass1_prompt(
-        ticker, snapshot, vol_profile, horizon_days, base_signals,
+        ticker, snapshot, vol_profile, horizon_days, display_signals_for_prompt,
         self_earnings_dt, peer_tickers,
     )
     pass1_raw, pass1_cost, pass1_sources = call_ai_pass(pass1_prompt, max_tokens=4000, pass_label="Pass 1")
     pass1 = parse_ai_pass1(pass1_raw, pass1_sources, pass1_cost) if pass1_raw else None
 
-    # --- 5. Catalyst proximity signal + structural narrative + factor arithmetic ---
+    # --- 5. AI-derived signals: catalyst proximity, structural narrative, factor arithmetic ---
     catalyst_mu, catalyst_conf, catalyst_rat = (0.0, "LOW", "no AI catalysts")
     narrative_mu, narrative_conf, narrative_rat = (0.0, "LOW", "no AI narrative")
     factor_bias, factor_rat = (0.0, "no factor analysis")
@@ -1771,61 +1802,82 @@ def run_pipeline(args) -> int:
         catalyst_mu, catalyst_conf, catalyst_rat = signal_from_catalyst_proximity(
             pass1.catalysts, horizon_days,
         )
-        evidence_count = sum(1 for c in pass1.catalysts if c.get("sources") and len(c.get("sources", [])) >= 2)
+        evidence_count = sum(
+            1 for c in pass1.catalysts
+            if c.get("sources") and len(c.get("sources", [])) >= 2
+        )
         narrative_mu, narrative_conf, narrative_rat = signal_from_structural_narrative(
             pass1.narrative_score, evidence_count,
         )
         factor_bias, factor_rat = apply_bull_bear_arithmetic(pass1.bull_factors, pass1.bear_factors)
 
-    base_signals.append(DriftSignal(
-        name="Catalyst proximity (AI-generated)",
-        mu_annual=catalyst_mu, confidence=catalyst_conf, source_quality="PRIMARY",
-        weight=0.06, rationale=catalyst_rat,
-    ))
-    base_signals.append(DriftSignal(
-        name="Structural narrative score",
-        mu_annual=narrative_mu, confidence=narrative_conf, source_quality="PRIMARY",
-        weight=0.05, rationale=narrative_rat,
-    ))
+    # Add AI-derived signals to the dict for blending
+    signals_dict["catalyst_proximity"] = {
+        "drift": catalyst_mu, "confidence": catalyst_conf,
+        "source_quality": "PRIMARY",
+        "sources_count": len(pass1.catalysts) if pass1 else 0,
+        "notes": catalyst_rat,
+    }
+    signals_dict["narrative"] = {
+        "drift": narrative_mu, "confidence": narrative_conf,
+        "source_quality": "PRIMARY",
+        "sources_count": 0,
+        "notes": narrative_rat,
+    }
 
-    # AI analyst signal (drift estimate from Pass 1, weight scales with confidence)
+    # AI analyst signal — weight scales with confidence (v2 spec)
     if pass1:
-        ai_weight = {"HIGH": 0.30, "MEDIUM": 0.22, "LOW": 0.15}.get(pass1.confidence, 0.15)
-        base_signals.append(DriftSignal(
-            name="AI analyst (Pass 1)",
-            mu_annual=pass1.drift_estimate, confidence=pass1.confidence,
-            source_quality="REPUTABLE", weight=ai_weight,
-            rationale=f"{pass1.raw_sources_cited} sources cited",
-        ))
+        signals_dict["ai"] = {
+            "drift": pass1.drift_estimate,
+            "confidence": pass1.confidence,
+            "source_quality": "REPUTABLE",
+            "sources_count": pass1.raw_sources_cited,
+            "notes": f"Pass 1 estimate ({pass1.raw_sources_cited} sources)",
+        }
+    else:
+        signals_dict["ai"] = _none_signal("AI Pass 1 failed")
 
     # --- 6. Blend signals into today's drift ---
-    print("Blending 11 signals + bull/bear arithmetic...")
-    today_mu, today_std = blend_with_uncertainty(
-        [(s.mu_annual, s.confidence, s.weight) for s in base_signals],
-    )
-    today_mu += factor_bias  # apply HIGH-factor net bias
-
-    # --- 7. Bayesian smoothing ---
-    prior = load_prior_posterior(history_path)
-    if prior:
-        prior_age_days = max(1, (datetime.now().date() -
-                                  datetime.strptime(prior["date"][:10], "%Y-%m-%d").date()).days)
-        post_mu, post_std = bayesian_update(
-            (prior["mu"], prior["std"]), (today_mu, today_std), prior_age_days,
-        )
-        prior_weight = (1 / prior["std"]**2) / (1 / prior["std"]**2 + 1 / today_std**2)
+    print(f"Blending {len(signals_dict)} signals + bull/bear arithmetic...")
+    blend = blend_with_uncertainty(signals_dict, weights_dict=BLEND_WEIGHTS_V2)
+    if blend and blend.get("blended") is not None:
+        today_mu = float(blend["blended"]) + factor_bias  # apply HIGH-factor net bias
+        today_std = float(blend.get("std", 0.20))
     else:
-        post_mu, post_std = today_mu, today_std
-        prior_weight = 0.0
+        today_mu = mu_effective_historical + factor_bias
+        today_std = 0.25
+
+    # --- 7. Bayesian smoothing (v1 dict format) ---
+    # v1's load_prior_blend reads thesis_history schema; v2 has its own.
+    # We read v2's CSV and convert to v1's dict format for bayesian_update.
+    prior_v2 = load_prior_posterior(history_path)
+    if prior_v2:
+        prior_age_days = max(1, (datetime.now().date() -
+                                  datetime.strptime(prior_v2["date"][:10], "%Y-%m-%d").date()).days)
+        prior_blend_v1_fmt = {"blended": prior_v2["mu"], "std": prior_v2["std"]}
+        today_blend_v1_fmt = {"blended": today_mu, "std": today_std}
+        bayesian = bayesian_update(prior_blend_v1_fmt, today_blend_v1_fmt,
+                                    prior_age_days=prior_age_days)
+        if bayesian and bayesian.get("posterior_mu") is not None:
+            post_mu = float(bayesian["posterior_mu"])
+            post_std = float(bayesian["posterior_std"])
+            prior_weight = float(bayesian.get("prior_weight", 0.0))
+        else:
+            post_mu, post_std, prior_weight = today_mu, today_std, 0.0
+    else:
+        post_mu, post_std, prior_weight = today_mu, today_std, 0.0
 
     posterior_summary = {
-        "prior_mu": prior["mu"] if prior else 0.0,
-        "prior_std": prior["std"] if prior else 0.15,
+        "prior_mu": prior_v2["mu"] if prior_v2 else 0.0,
+        "prior_std": prior_v2["std"] if prior_v2 else 0.15,
         "today_mu": today_mu, "today_std": today_std,
         "post_mu": post_mu, "post_std": post_std,
         "prior_weight": prior_weight,
         "today_weight": 1 - prior_weight,
     }
+
+    # Build display list for report (converts dict back to list[DriftSignal])
+    base_signals = _signals_dict_to_display_list(signals_dict, BLEND_WEIGHTS_V2)
 
     # --- 8. Build vol schedule ---
     vol_schedule = build_catalyst_vol_schedule(
