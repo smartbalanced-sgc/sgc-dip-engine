@@ -724,6 +724,10 @@ def build_ai_pass2_prompt(
     to find errors, missing catalysts, or weak reasoning in Pass 1, then
     produce a REVISED drift estimate with specific corrections.
     """
+    def _safe_name(c):
+        return c.get("name", "?") if isinstance(c, dict) else str(c)
+    def _safe_factor(f):
+        return f.get("factor", str(f)) if isinstance(f, dict) else str(f)
     pass1_summary = {
         "drift_estimate": pass1.drift_estimate,
         "drift_range": list(pass1.drift_range),
@@ -731,9 +735,9 @@ def build_ai_pass2_prompt(
         "vol_regime": pass1.vol_regime,
         "narrative_score": pass1.narrative_score,
         "catalysts_count": len(pass1.catalysts),
-        "catalyst_names": [c.get("name", "?") for c in pass1.catalysts],
-        "bull_factors_high": [f.get("factor") for f in pass1.bull_factors if f.get("weight") == "high"],
-        "bear_factors_high": [f.get("factor") for f in pass1.bear_factors if f.get("weight") == "high"],
+        "catalyst_names": [_safe_name(c) for c in pass1.catalysts],
+        "bull_factors_high": [_safe_factor(f) for f in pass1.bull_factors if _factor_weight(f) == "high"],
+        "bear_factors_high": [_safe_factor(f) for f in pass1.bear_factors if _factor_weight(f) == "high"],
     }
     prior_str = f"{prior_posterior_drift:+.1%}/yr" if prior_posterior_drift is not None else "n/a (no history)"
     return f"""You are PASS 2 — an adversarial critic of Pass 1's analysis of {ticker}.
@@ -804,10 +808,19 @@ def call_ai_pass(prompt: str, max_tokens: int = 3000, pass_label: str = "Pass") 
         json_text = full_text[start:end + 1]
 
         try:
-            parsed = json.loads(json_text)
+            # strict=False allows literal control characters (newlines, tabs) inside
+            # JSON string values — Opus often emits these instead of \n escapes.
+            parsed = json.loads(json_text, strict=False)
         except json.JSONDecodeError as e:
-            print(f"⚠️  {pass_label}: JSON parse error: {e}")
-            return None, cost, 0
+            # Fallback: sanitize control chars and retry
+            import re
+            sanitized = re.sub(r'[\x00-\x08\x0b\x0c\x0e-\x1f]', ' ', json_text)
+            try:
+                parsed = json.loads(sanitized, strict=False)
+            except json.JSONDecodeError as e2:
+                print(f"⚠️  {pass_label}: JSON parse error after sanitisation: {e2}")
+                print(f"   (first 400 chars of response): {full_text[:400]}")
+                return None, cost, 0
 
         # Count distinct sources mentioned across all citations
         sources = set()
@@ -846,7 +859,9 @@ def call_ai_catalyst_stress_test(
     if client is None or not catalysts:
         return [], 0.0
 
-    top = catalysts[:3]
+    top = [c for c in catalysts[:3] if isinstance(c, dict)]
+    if not top:
+        return [], 0.0
     prompt = f"""For {ticker} at spot ${spot:.2f}, dip target ${dip_price:.0f}, rally target ${rally_price:.0f},
 60-day horizon. For each catalyst below, estimate the directional drift impact
 (annualised pp) if the catalyst disappoints by 20% on its key metric.
@@ -911,6 +926,8 @@ def signal_from_catalyst_proximity(catalysts: list[dict], horizon_days: int) -> 
     total = 0.0
     in_window_count = 0
     for c in catalysts:
+        if not isinstance(c, dict):
+            continue
         try:
             date_str = c.get("date_or_window", "")
             if "-" not in date_str:  # window like "next 30d" — assume mid-window
@@ -943,18 +960,19 @@ def signal_from_structural_narrative(narrative_score: str, evidence_count: int) 
     return adj, conf, f"narrative={narrative_score} ({evidence_count} evidence sources)"
 
 
+def _factor_weight(f) -> str:
+    """Defensive: AI might return list of dicts OR list of strings."""
+    if isinstance(f, dict):
+        return str(f.get("weight", "low")).lower()
+    return "low"  # strings don't carry weight metadata
+
+
 def apply_bull_bear_arithmetic(
-    bull_factors: list[dict], bear_factors: list[dict]
+    bull_factors: list, bear_factors: list
 ) -> tuple[float, str]:
     """Sum weighted bull/bear factors, return drift tail bias and rationale."""
-    def weighted_sum(factors):
-        s = 0
-        for f in factors:
-            w = FACTOR_WEIGHTS.get(f.get("weight", "low").lower(), 1)
-            s += w
-        return s
-    bull_high = sum(1 for f in bull_factors if f.get("weight", "").lower() == "high")
-    bear_high = sum(1 for f in bear_factors if f.get("weight", "").lower() == "high")
+    bull_high = sum(1 for f in bull_factors if _factor_weight(f) == "high")
+    bear_high = sum(1 for f in bear_factors if _factor_weight(f) == "high")
     net = bull_high * FACTOR_WEIGHTS["high"] - bear_high * FACTOR_WEIGHTS["high"]
     if net > FACTOR_NET_THRESHOLD:
         return FACTOR_TAIL_BIAS, f"HIGH-bull dominance (net +{net}) → +{FACTOR_TAIL_BIAS:.0%} rally bias"
@@ -1301,9 +1319,12 @@ def format_report(
         lines.append(f"  PASS 1: drift={pass1.drift_estimate:+.1%}/yr  conf={pass1.confidence}  vol_regime={pass1.vol_regime}  narrative={pass1.narrative_score}  sources={pass1.raw_sources_cited}  cost=${pass1.cost_usd:.2f}")
         lines.append(f"    Catalysts identified: {len(pass1.catalysts)}")
         for c in pass1.catalysts[:5]:
-            lines.append(f"      • {c.get('name','?')} ({c.get('date_or_window','?')}, {c.get('direction_risk','?')}, magnitude {c.get('magnitude','?')})")
-        lines.append(f"    Bull factors HIGH-weight: {sum(1 for f in pass1.bull_factors if f.get('weight','').lower()=='high')}")
-        lines.append(f"    Bear factors HIGH-weight: {sum(1 for f in pass1.bear_factors if f.get('weight','').lower()=='high')}")
+            if isinstance(c, dict):
+                lines.append(f"      • {c.get('name','?')} ({c.get('date_or_window','?')}, {c.get('direction_risk','?')}, magnitude {c.get('magnitude','?')})")
+            else:
+                lines.append(f"      • {c}")
+        lines.append(f"    Bull factors HIGH-weight: {sum(1 for f in pass1.bull_factors if _factor_weight(f) == 'high')}")
+        lines.append(f"    Bear factors HIGH-weight: {sum(1 for f in pass1.bear_factors if _factor_weight(f) == 'high')}")
     else:
         lines.append("  PASS 1: failed or skipped")
     if pass2:
@@ -1752,8 +1773,9 @@ def run_pipeline(args) -> int:
     targets = fetch_analyst_targets(ticker, api_key)
     summary = fetch_analyst_summary(ticker, api_key)
     sector_perf = fetch_sector_perf(sector, api_key) if sector and sector != "Unknown" else None
-    regime = detect_swing_regime(rsi, mom_5d,
-                                  mom_30d * 100 if abs(mom_30d) < 5 else mom_30d,
+    # v1's detect_swing_regime expects mom_5d as FRACTION but mom_30d_pct and
+    # ytd_return_pct as PERCENTAGES — see v1 line 1228, 2099-2101.
+    regime = detect_swing_regime(rsi, mom_5d, mom_30d * 100,
                                   blended_sigma, ytd_return * 100)
     macro = fetch_macro_indicators(api_key)
     insider = fetch_insider_activity(ticker, api_key)
@@ -1784,15 +1806,19 @@ def run_pipeline(args) -> int:
     }
 
     # --- 4. AI Pass 1 ---
-    print("AI Pass 1 (data gathering + multi-hypothesis catalysts)...")
-    # Build display-only signal list for prompt (uses v1 dict format)
-    display_signals_for_prompt = _signals_dict_to_display_list(signals_dict, BLEND_WEIGHTS_V2)
-    pass1_prompt = build_ai_pass1_prompt(
-        ticker, snapshot, vol_profile, horizon_days, display_signals_for_prompt,
-        self_earnings_dt, peer_tickers,
-    )
-    pass1_raw, pass1_cost, pass1_sources = call_ai_pass(pass1_prompt, max_tokens=4000, pass_label="Pass 1")
-    pass1 = parse_ai_pass1(pass1_raw, pass1_sources, pass1_cost) if pass1_raw else None
+    pass1 = None
+    if args.no_ai:
+        print("AI Pass 1 skipped (--no-ai)")
+    else:
+        print("AI Pass 1 (data gathering + multi-hypothesis catalysts)...")
+        # Build display-only signal list for prompt (uses v1 dict format)
+        display_signals_for_prompt = _signals_dict_to_display_list(signals_dict, BLEND_WEIGHTS_V2)
+        pass1_prompt = build_ai_pass1_prompt(
+            ticker, snapshot, vol_profile, horizon_days, display_signals_for_prompt,
+            self_earnings_dt, peer_tickers,
+        )
+        pass1_raw, pass1_cost, pass1_sources = call_ai_pass(pass1_prompt, max_tokens=4000, pass_label="Pass 1")
+        pass1 = parse_ai_pass1(pass1_raw, pass1_sources, pass1_cost) if pass1_raw else None
 
     # --- 5. AI-derived signals: catalyst proximity, structural narrative, factor arithmetic ---
     catalyst_mu, catalyst_conf, catalyst_rat = (0.0, "LOW", "no AI catalysts")
@@ -1854,8 +1880,11 @@ def run_pipeline(args) -> int:
     if prior_v2:
         prior_age_days = max(1, (datetime.now().date() -
                                   datetime.strptime(prior_v2["date"][:10], "%Y-%m-%d").date()).days)
-        prior_blend_v1_fmt = {"blended": prior_v2["mu"], "std": prior_v2["std"]}
-        today_blend_v1_fmt = {"blended": today_mu, "std": today_std}
+        # Floor std at 0.05 to avoid div-by-zero or pathological narrow priors
+        prior_std_safe = max(0.05, float(prior_v2.get("std") or 0.15))
+        today_std_safe = max(0.05, float(today_std))
+        prior_blend_v1_fmt = {"blended": prior_v2["mu"], "std": prior_std_safe}
+        today_blend_v1_fmt = {"blended": today_mu, "std": today_std_safe}
         bayesian = bayesian_update(prior_blend_v1_fmt, today_blend_v1_fmt,
                                     prior_age_days=prior_age_days)
         if bayesian and bayesian.get("posterior_mu") is not None:
@@ -1919,26 +1948,33 @@ def run_pipeline(args) -> int:
     )
 
     # --- 12. AI Pass 2 (adversarial critique) ---
-    print("AI Pass 2 (adversarial critique)...")
     pass2 = None
-    if pass1 and best:
+    if args.no_ai:
+        print("AI Pass 2 skipped (--no-ai)")
+    elif pass1 and best:
+        print("AI Pass 2 (adversarial critique)...")
+        # Compute marginal probs ONCE (cache to avoid duplicate MC analysis)
+        up_marginal = analyze_joint_conditional(paths, spot, spot*0.5, spot*1.1, horizon_days)
+        down_marginal = analyze_joint_conditional(paths, spot, spot*0.9, spot*1.5, horizon_days)
         mc_marginal_summary = {
-            "p_up_10pct": f"{analyze_joint_conditional(paths, spot, spot*0.5, spot*1.1, horizon_days)['p_no_trade_rally_first'] + analyze_joint_conditional(paths, spot, spot*0.5, spot*1.1, horizon_days)['p_round_trip']:.0%}",
-            "p_down_10pct": f"{analyze_joint_conditional(paths, spot, spot*0.9, spot*1.5, horizon_days)['p_dip_touched_marginal']:.0%}",
+            "p_up_10pct": f"{up_marginal['p_no_trade_rally_first'] + up_marginal['p_round_trip']:.0%}",
+            "p_down_10pct": f"{down_marginal['p_dip_touched_marginal']:.0%}",
         }
         sigma_summary = {"blended": blended_sigma, "divergence": vol_profile.divergence_pp}
         pass2_prompt = build_ai_pass2_prompt(
             ticker, snapshot, pass1, mc_marginal_summary, sigma_summary,
-            prior["mu"] if prior else None,
+            prior_v2["mu"] if prior_v2 else None,
         )
         pass2_raw, pass2_cost, _ = call_ai_pass(pass2_prompt, max_tokens=1500, pass_label="Pass 2")
         if pass2_raw:
             pass2 = parse_ai_pass2(pass2_raw, pass1.drift_estimate, pass2_cost)
+    else:
+        print("AI Pass 2 skipped (Pass 1 failed or no pair found)")
 
     # --- 13. AI catalyst stress test ---
     catalyst_stress_results = []
     catalyst_stress_cost = 0.0
-    if pass1 and best:
+    if not args.no_ai and pass1 and best:
         print("AI catalyst impact stress test...")
         catalyst_stress_results, catalyst_stress_cost = call_ai_catalyst_stress_test(
             ticker, spot, best.dip_price, best.rally_price, pass1.catalysts, horizon_days,
@@ -1983,7 +2019,8 @@ def run_pipeline(args) -> int:
         "ai_vol_regime": pass1.vol_regime if pass1 else "",
         "narrative_score": pass1.narrative_score if pass1 else "",
         "catalyst_proximity_drift": f"{catalyst_mu:.4f}",
-        "garch_alpha_plus_beta": f"{alpha_plus_beta:.4f}",
+        # GARCH α+β diagnostic deferred to v3 (see v2 spec); using vol_profile field
+        "garch_alpha_plus_beta": f"{vol_profile.garch_alpha_plus_beta:.4f}",
         "horizon_days": str(horizon_days),
         "method_agreement_flags": ";".join(method_check["flags"]),
         "ai_cost_total": f"{total_ai_cost:.2f}",
@@ -2027,6 +2064,8 @@ def main():
                    help=f"Conditional P(rally | dip) threshold (default {DEFAULT_CONVICTION_RALLY_COND})")
     p.add_argument("--mean-reversion", type=float, default=0.0,
                    help="Mean-reversion strength (default 0.0 = OFF; try 0.05/0.10/0.20 for sensitivity)")
+    p.add_argument("--no-ai", action="store_true",
+                   help="Skip all AI calls (math + backtest only). Use for debugging without token cost.")
     p.add_argument("--show-rationale", action="store_true",
                    help="Verbose mode (currently default)")
     args = p.parse_args()
