@@ -175,8 +175,15 @@ VOL_SCHEDULE_MULTIPLIERS = {
     "macro_event_day": 1.5,         # FOMC, CPI prints
 }
 
-# Three-method agreement tolerance — flag if MC vs PDE disagree by > 2pp
-METHOD_AGREEMENT_TOLERANCE_PP = 2.0
+# Three-method agreement tolerance.
+# Marginal "ever touched" must agree tightly (closed-form is exact under GBM).
+# First-passage has irreducible residual at high σ from discrete bridge sampling
+# (intra-day order between two barriers when both touched same day cannot be
+# disambiguated by daily-close + bridge). Empirically 2-4pp at σ=98%.
+METHOD_AGREEMENT_TOLERANCE_PP_MARGINAL = 2.0      # P(touch ever)
+METHOD_AGREEMENT_TOLERANCE_PP_FIRST_PASSAGE = 4.0  # P(dip first), P(rally first)
+# Legacy alias kept for any unhanded references; prefer the two above.
+METHOD_AGREEMENT_TOLERANCE_PP = METHOD_AGREEMENT_TOLERANCE_PP_FIRST_PASSAGE
 
 # Bag-hold valuation assumption for expected $/trade computation
 # When bag-hold occurs at horizon end, assume position is at:
@@ -213,6 +220,134 @@ V3_REVIEW_CRITERIA = {
     "catalyst_signal_correlation_min": 0.10,        # if catalyst signal correlation with realized < 0.10, drop
     "bag_hold_rate_target": (0.10, 0.20),           # actual bag-hold within target band
 }
+
+
+# =============================================================================
+# GARCH(1,1) FULL FIT — returns α, β, ω + forecast variance (v1's fit_garch_11
+# only returns scalar variance; v2 needs the params for α+β unit-root diagnostic).
+# Implementation mirrors src/garch_model.py:10-83 (READ ONLY — sacred file).
+# =============================================================================
+
+def fit_garch_11_full(returns: pd.Series) -> dict:
+    """GARCH(1,1) fit returning {omega, alpha, beta, forecast_variance, fit_ok}.
+
+    σ²(t) = ω + α r²(t-1) + β σ²(t-1)
+    Stationarity constraint: α + β < 1 (else non-stationary / IGARCH).
+    Near-IGARCH (α+β > 0.98) means vol shocks are highly persistent.
+
+    Returns a dict so v2 can expose α+β explicitly. Falls back to rolling variance
+    if optimization fails or insufficient data.
+    """
+    from scipy.optimize import minimize as _minimize
+
+    r = returns.replace([np.inf, -np.inf], np.nan).dropna()
+    if len(r) < 50:
+        return {
+            "omega": 0.0, "alpha": 0.0, "beta": 0.0,
+            "forecast_variance": float(r.var()) if len(r) > 0 else 1e-6,
+            "fit_ok": False,
+        }
+
+    def neg_ll(params):
+        omega, alpha, beta = params
+        if omega <= 0 or alpha < 0 or beta < 0 or alpha + beta >= 0.9999:
+            return 1e10
+        T = len(r)
+        s2 = np.zeros(T)
+        s2[0] = r.var()
+        for t in range(1, T):
+            s2[t] = omega + alpha * r.iloc[t - 1] ** 2 + beta * s2[t - 1]
+        return 0.5 * np.sum(np.log(2 * np.pi * s2) + r.values ** 2 / s2)
+
+    try:
+        res = _minimize(
+            neg_ll, [0.0001, 0.05, 0.90], method="L-BFGS-B",
+            bounds=[(1e-8, 1.0), (0.0, 1.0), (0.0, 0.9999)],
+        )
+        omega, alpha, beta = res.x
+        last_var = float(r.tail(20).var())
+        forecast_var = float(omega + alpha * r.iloc[-1] ** 2 + beta * last_var)
+        return {
+            "omega": float(omega),
+            "alpha": float(alpha),
+            "beta": float(beta),
+            "forecast_variance": forecast_var,
+            "fit_ok": bool(res.success and forecast_var > 0 and not np.isnan(forecast_var)),
+        }
+    except Exception:
+        fallback_var = float(r.tail(90).var())
+        return {
+            "omega": 0.0, "alpha": 0.0, "beta": 0.0,
+            "forecast_variance": fallback_var, "fit_ok": False,
+        }
+
+
+# =============================================================================
+# CATALYST DATE PARSER — handle Y/M/Q/range formats from AI output
+# =============================================================================
+
+def parse_catalyst_date(date_str: str) -> Optional["datetime.date"]:
+    """Robust catalyst date parser. Handles:
+      - YYYY-MM-DD          → exact date
+      - YYYY-MM             → first of month
+      - YYYY                → first of year
+      - YYYY-Q1/Q2/Q3/Q4    → start of quarter
+      - YYYY-MM/YYYY-MM     → earliest of range
+      - "next 30d"          → today + 15 (mid-window)
+      - "next NNd"          → today + NN/2
+    Returns date or None if unparseable.
+    """
+    if not date_str or not isinstance(date_str, str):
+        return None
+    s = date_str.strip().lower()
+    today = datetime.now().date()
+
+    # Range: take earliest
+    if "/" in s:
+        parts = [p.strip() for p in s.split("/") if p.strip()]
+        candidates = [parse_catalyst_date(p) for p in parts]
+        valid = [c for c in candidates if c is not None]
+        return min(valid) if valid else None
+
+    # "next NNd" / "next 30 days"
+    m = None
+    import re
+    m = re.match(r"next\s+(\d+)\s*d", s)
+    if m:
+        offset = int(m.group(1)) // 2  # mid-window
+        return today + timedelta(days=offset)
+
+    # Quarter: YYYY-Q1..Q4
+    m = re.match(r"(\d{4})[-\s]?q([1-4])", s)
+    if m:
+        year = int(m.group(1))
+        q = int(m.group(2))
+        month = {1: 1, 2: 4, 3: 7, 4: 10}[q]
+        try:
+            return datetime(year, month, 1).date()
+        except ValueError:
+            return None
+
+    # YYYY-MM-DD or YYYY-MM-DDTHH:MM:SS or YYYY-MM
+    m = re.match(r"(\d{4})-(\d{1,2})(?:-(\d{1,2}))?", s)
+    if m:
+        try:
+            year = int(m.group(1))
+            month = int(m.group(2))
+            day = int(m.group(3)) if m.group(3) else 1
+            return datetime(year, month, day).date()
+        except ValueError:
+            return None
+
+    # YYYY only
+    m = re.match(r"^(\d{4})$", s)
+    if m:
+        try:
+            return datetime(int(m.group(1)), 1, 1).date()
+        except ValueError:
+            return None
+
+    return None
 
 
 # =============================================================================
@@ -609,7 +744,7 @@ def three_method_cross_check(
     p_touch_rally_marginal_mc = mc_result.get("p_rally_touched_any",
                                                mc_result["p_no_trade_rally_first"] + mc_result["p_round_trip"])
 
-    # Disagreement flags
+    # Disagreement flags — first-passage rows allowed a wider tolerance than marginal
     flags = []
     pp = lambda x: x * 100.0
 
@@ -618,13 +753,13 @@ def three_method_cross_check(
     diff_touch_dip = abs(pp(p_touch_dip_marginal_mc) - pp(p_touch_dip_closed))
     diff_touch_rally = abs(pp(p_touch_rally_marginal_mc) - pp(p_touch_rally_closed))
 
-    if diff_dip_first > METHOD_AGREEMENT_TOLERANCE_PP:
+    if diff_dip_first > METHOD_AGREEMENT_TOLERANCE_PP_FIRST_PASSAGE:
         flags.append(f"MC vs PDE disagree on P(dip first) by {diff_dip_first:.1f}pp")
-    if diff_rally_first > METHOD_AGREEMENT_TOLERANCE_PP:
+    if diff_rally_first > METHOD_AGREEMENT_TOLERANCE_PP_FIRST_PASSAGE:
         flags.append(f"MC vs PDE disagree on P(rally first) by {diff_rally_first:.1f}pp")
-    if diff_touch_dip > METHOD_AGREEMENT_TOLERANCE_PP:
+    if diff_touch_dip > METHOD_AGREEMENT_TOLERANCE_PP_MARGINAL:
         flags.append(f"MC vs closed-form disagree on marginal P(touch dip) by {diff_touch_dip:.1f}pp")
-    if diff_touch_rally > METHOD_AGREEMENT_TOLERANCE_PP:
+    if diff_touch_rally > METHOD_AGREEMENT_TOLERANCE_PP_MARGINAL:
         flags.append(f"MC vs closed-form disagree on marginal P(touch rally) by {diff_touch_rally:.1f}pp")
 
     return {
@@ -995,18 +1130,15 @@ def signal_from_catalyst_proximity(catalysts: list[dict], horizon_days: int) -> 
     for c in catalysts:
         if not isinstance(c, dict):
             continue
-        try:
-            date_str = c.get("date_or_window", "")
-            if "-" not in date_str:  # window like "next 30d" — assume mid-window
-                continue
-            cdate = datetime.strptime(date_str[:10], "%Y-%m-%d").date()
-            if today <= cdate <= horizon_end:
-                mag = mag_map.get(c.get("magnitude", "med"), 0.05)
-                sign = dir_sign.get(c.get("direction_risk", "two-sided"), 0.0)
-                total += mag * sign
-                in_window_count += 1
-        except Exception:
+        date_str = c.get("date_or_window", "")
+        cdate = parse_catalyst_date(date_str)
+        if cdate is None:
             continue
+        if today <= cdate <= horizon_end:
+            mag = mag_map.get(str(c.get("magnitude", "med")).lower(), 0.05)
+            sign = dir_sign.get(str(c.get("direction_risk", "two-sided")).lower(), 0.0)
+            total += mag * sign
+            in_window_count += 1
 
     # Cap at ±15pp
     total = max(-0.15, min(0.15, total))
@@ -1198,6 +1330,131 @@ def scan_dip_rally_grid(
 # Runs every day, displays "insufficient data" until N >= BACKTEST_MIN_SAMPLES
 # =============================================================================
 
+def compute_path_metrics(paths: np.ndarray, S0: float, dip_price: float,
+                          rally_price: float) -> dict:
+    """Extract path-dependent statistics from final 100k MC paths.
+
+    Returns max-drawdown distribution, panic-floor touch probability, and
+    time-to-target percentiles. These describe what your position experiences
+    on the way to (or instead of) the recommended targets.
+    """
+    n_paths, n_days = paths.shape
+    # Max drawdown per path: peak-to-trough fall from running max
+    running_max = np.maximum.accumulate(paths, axis=1)
+    drawdowns = (running_max - paths) / running_max
+    max_dd_per_path = drawdowns.max(axis=1)
+
+    # Panic floor: spot * 0.7 (30% below entry) — historically meaningful for SNDK
+    panic_floor = S0 * 0.7
+    p_panic_touched = float((paths.min(axis=1) <= panic_floor).mean())
+
+    # Time-to-target distributions (conditional on touching)
+    dip_touch_day = np.where(
+        (paths <= dip_price).any(axis=1),
+        (paths <= dip_price).argmax(axis=1),
+        -1,
+    )
+    rally_touch_day = np.where(
+        (paths >= rally_price).any(axis=1),
+        (paths >= rally_price).argmax(axis=1),
+        -1,
+    )
+    dip_days = dip_touch_day[dip_touch_day >= 0]
+    rally_days = rally_touch_day[rally_touch_day >= 0]
+
+    return {
+        "max_dd_p50": float(np.percentile(max_dd_per_path, 50)),
+        "max_dd_p75": float(np.percentile(max_dd_per_path, 75)),
+        "max_dd_p90": float(np.percentile(max_dd_per_path, 90)),
+        "max_dd_price_p50": float(S0 * (1 - np.percentile(max_dd_per_path, 50))),
+        "max_dd_price_p75": float(S0 * (1 - np.percentile(max_dd_per_path, 75))),
+        "max_dd_price_p90": float(S0 * (1 - np.percentile(max_dd_per_path, 90))),
+        "panic_floor_price": float(panic_floor),
+        "p_panic_touched": p_panic_touched,
+        "time_to_dip_p50": float(np.percentile(dip_days, 50)) if len(dip_days) else None,
+        "time_to_dip_p25": float(np.percentile(dip_days, 25)) if len(dip_days) else None,
+        "time_to_dip_p75": float(np.percentile(dip_days, 75)) if len(dip_days) else None,
+        "time_to_rally_p50": float(np.percentile(rally_days, 50)) if len(rally_days) else None,
+        "time_to_rally_p25": float(np.percentile(rally_days, 25)) if len(rally_days) else None,
+        "time_to_rally_p75": float(np.percentile(rally_days, 75)) if len(rally_days) else None,
+    }
+
+
+def compute_sensitivity_table(
+    S0: float,
+    base_sigma: float,
+    base_mu: float,
+    horizon_days: int,
+    dip_price: float,
+    rally_price: float,
+    capital_usd: float,
+    spread_per_share_round_trip: float,
+    catalyst_shocks: list[dict],
+    vol_schedule_base: Optional[np.ndarray] = None,
+    n_paths_sensitivity: int = 10_000,
+) -> list[dict]:
+    """Run small MCs with shifted (drift, sigma) for each scenario.
+
+    Returns list of rows: {label, mu, sigma, p_round_trip, p_bag_hold, net_ev_per_share}.
+    Each scenario uses 10k paths (3s each) → ~30s total for 9 scenarios.
+    Same bridge correction as main MC so results are directly comparable.
+    """
+    scenarios = [
+        ("Baseline (current)",            base_mu,         base_sigma),
+        ("Drift -15pp",                   base_mu - 0.15,  base_sigma),
+        ("Drift +15pp",                   base_mu + 0.15,  base_sigma),
+        ("σ -20%",                        base_mu,         base_sigma * 0.80),
+        ("σ +20%",                        base_mu,         base_sigma * 1.20),
+        ("Hostile (Δ-15, σ+20)",          base_mu - 0.15,  base_sigma * 1.20),
+    ]
+    # Add per-catalyst stress rows if shocks were computed
+    for shock in catalyst_shocks[:3]:
+        try:
+            name = str(shock.get("catalyst_name") or shock.get("name") or "catalyst")
+            pp = float(shock.get("drift_shock_pp_on_disappointment") or 0.0)
+            label = f"{name[:35]} ({pp:+.0f}pp)"
+            scenarios.append((label, base_mu + pp / 100.0, base_sigma))
+        except (TypeError, ValueError):
+            continue
+
+    rows = []
+    for label, mu_s, sigma_s in scenarios:
+        # Build per-scenario vol schedule by rescaling the base schedule proportionally
+        if vol_schedule_base is not None and base_sigma > 0:
+            scale = sigma_s / base_sigma
+            vs = vol_schedule_base * scale
+        else:
+            vs = None
+        # Small MC with shifted params
+        paths_s = run_mc_joint_conditional(
+            S0=S0, sigma=sigma_s, mu=mu_s,
+            horizon_days=horizon_days, n_paths=n_paths_sensitivity,
+            vol_schedule=vs, seed=42 + len(rows),
+        )
+        result = analyze_joint_conditional(
+            paths_s, S0, dip_price, rally_price, horizon_days,
+            sigma=sigma_s, vol_schedule=vs,
+        )
+        gain_per_share = rally_price - dip_price - spread_per_share_round_trip
+        bag_hold_loss = dip_price - result["bag_hold_terminal_median"]
+        net_ev_per_share = (
+            result["p_round_trip"] * gain_per_share
+            + result["p_bag_hold"] * (-bag_hold_loss)
+        )
+        shares = capital_usd / dip_price
+        rows.append({
+            "label": label,
+            "mu": mu_s,
+            "sigma": sigma_s,
+            "p_round_trip": result["p_round_trip"],
+            "p_bag_hold": result["p_bag_hold"],
+            "p_no_trade": result["p_no_trade_rally_first"],
+            "net_ev_per_share": net_ev_per_share,
+            "net_ev_total": net_ev_per_share * shares,
+        })
+    return rows
+
+
 def run_backtest_layer(history_path: Path, current_price: float) -> dict:
     """Walk through CSV history, compute calibration metrics.
 
@@ -1317,14 +1574,37 @@ CSV_COLUMNS = [
 
 
 def append_history_row(history_path: Path, row: dict):
-    """Append a row, creating file with header if not exists."""
+    """Write a row, replacing any existing row with the same date.
+
+    Same-day re-runs (debugging, intraday checks) update the last row instead
+    of accumulating duplicates. One canonical record per calendar date.
+    """
     history_path.parent.mkdir(parents=True, exist_ok=True)
-    exists = history_path.exists()
-    with open(history_path, "a", newline="") as f:
-        writer = csv.DictWriter(f, fieldnames=CSV_COLUMNS, extrasaction="ignore")
-        if not exists:
+    today_str = row.get("date", "")
+
+    if not history_path.exists():
+        with open(history_path, "w", newline="") as f:
+            writer = csv.DictWriter(f, fieldnames=CSV_COLUMNS, extrasaction="ignore")
             writer.writeheader()
-        writer.writerow(row)
+            writer.writerow(row)
+        return
+
+    # Read existing, dedup by date, write back
+    try:
+        with open(history_path, "r", newline="") as f:
+            existing = list(csv.DictReader(f))
+    except Exception:
+        existing = []
+
+    # Drop any existing rows for today (we replace with new row)
+    existing = [r for r in existing if r.get("date", "") != today_str]
+    existing.append(row)
+
+    with open(history_path, "w", newline="") as f:
+        writer = csv.DictWriter(f, fieldnames=CSV_COLUMNS, extrasaction="ignore")
+        writer.writeheader()
+        for r in existing:
+            writer.writerow(r)
 
 
 def load_prior_posterior(history_path: Path) -> Optional[dict]:
@@ -1394,6 +1674,8 @@ def format_report(
     runtime_seconds: float,
     met_threshold_strict: bool = True,
     unusual_move: Optional[dict] = None,
+    sensitivity: Optional[list[dict]] = None,
+    path_metrics: Optional[dict] = None,
 ) -> str:
     lines: list[str] = []
     lines.append(hr(f"SANDISK SWING TRADER ({V2_VERSION}) — {snapshot.timestamp:%Y-%m-%d %H:%M}"))
@@ -1415,6 +1697,12 @@ def format_report(
                 conviction_dip, conviction_rally_cond))
             lines.append("  ⚠ Showing best-by-EV fallback. DO NOT TRADE this pair without re-evaluating.")
             lines.append("  ⚠ Action: WAIT for a higher-conviction setup OR adjust thresholds with --conviction-dip / --conviction-rally-cond.")
+            lines.append("")
+        # Negative expected value warning even when thresholds met
+        if best.net_expected_value < 0 and met_threshold_strict:
+            lines.append("  ⚠ NEGATIVE EXPECTED VALUE — thresholds met BUT average outcome loses money.")
+            lines.append(f"  ⚠ Bag-hold scenario (P={best.p_bag_hold:.0%}, ${best.expected_bag_hold_loss:,.0f}/share loss) dominates the gain.")
+            lines.append("  ⚠ Consider waiting for a higher-EV setup or skipping this trade.")
             lines.append("")
         shares = capital_usd / best.dip_price
         lines.append(f"  Dip buy-limit:    ${best.dip_price:,.0f}  (P(touch within {horizon_days}d) = {best.p_dip_touched:.1%}, expected day {best.expected_days_to_dip:.0f})")
@@ -1455,17 +1743,26 @@ def format_report(
         if trigger:
             lines.append("  (Pattern from src/sentiment.py — abnormal moves often precede / signal catalysts)")
 
-    # SIGMA TRIANGULATION
-    lines.append(hr("SIGMA TRIANGULATION (5 anchors)"))
-    lines.append(f"  GARCH spot:       {vol_profile.garch_sigma:.1%}  (α+β={vol_profile.garch_alpha_plus_beta:.3f})")
+    # SIGMA TRIANGULATION — header reflects actual anchor count
+    lines.append(hr(f"SIGMA TRIANGULATION ({vol_profile.anchors_count} anchors)"))
+    if vol_profile.garch_alpha_plus_beta > 0:
+        alpha_beta_str = (
+            f"α={vol_profile.garch_alpha:.3f}, β={vol_profile.garch_beta:.3f}, "
+            f"α+β={vol_profile.garch_alpha_plus_beta:.3f}"
+        )
+    else:
+        alpha_beta_str = "α+β fit failed"
+    lines.append(f"  GARCH spot:       {vol_profile.garch_sigma:.1%}  ({alpha_beta_str})")
     lines.append(f"  Realized 30d:     {vol_profile.realized_30d:.1%}")
     lines.append(f"  Realized 60d:     {vol_profile.realized_60d:.1%}")
     lines.append(f"  Realized 90d:     {vol_profile.realized_90d:.1%}")
     iv_str = f"{vol_profile.options_iv:.1%} (DTE {vol_profile.options_dte})" if vol_profile.options_iv else "n/a"
     lines.append(f"  Options IV:       {iv_str}")
-    lines.append(f"  BLENDED:          {vol_profile.blended_sigma:.1%}   Divergence: {vol_profile.divergence_pp:.1f}pp ({vol_profile.anchors_count} anchors)")
+    lines.append(f"  BLENDED:          {vol_profile.blended_sigma:.1%}   Divergence: {vol_profile.divergence_pp:.1f}pp")
     if vol_profile.near_unit_root:
         lines.append(f"  ⚠ GARCH α+β > 0.98 — near-IGARCH, vol shocks highly persistent")
+    elif 0.95 < vol_profile.garch_alpha_plus_beta <= 0.98:
+        lines.append(f"  ⚠ GARCH α+β > 0.95 — high vol persistence, multi-step forecasts unreliable")
 
     # 11-SIGNAL DRIFT BLEND
     lines.append(hr(f"DRIFT INTELLIGENCE ({len(base_signals)} signals)"))
@@ -1479,6 +1776,40 @@ def format_report(
     lines.append(f"  Today's blend:              mu={posterior.get('today_mu', 0):+.1%}/yr, std={posterior.get('today_std', 0.20)*100:.1f}pp")
     lines.append(f"  Posterior (used in MC):     mu={posterior.get('post_mu', 0):+.1%}/yr, std={posterior.get('post_std', 0.10)*100:.1f}pp")
     lines.append(f"  Prior weight: {posterior.get('prior_weight', 0):.0%}, today weight: {posterior.get('today_weight', 0):.0%}")
+
+    # SENSITIVITY TABLE — drift/sigma swings + per-catalyst stress
+    if sensitivity and best:
+        lines.append(hr("SENSITIVITY at recommended pair"))
+        lines.append(f"  {'Scenario':<35} {'μ':>7} {'σ':>7} {'P(RT)':>7} {'P(BH)':>7} {'Net EV/sh':>11}")
+        for row in sensitivity:
+            lines.append(
+                f"  {row['label']:<35} "
+                f"{row['mu']*100:>+6.0f}% "
+                f"{row['sigma']*100:>6.0f}% "
+                f"{row['p_round_trip']*100:>6.0f}% "
+                f"{row['p_bag_hold']*100:>6.0f}% "
+                f"{'$' + format(int(round(row['net_ev_per_share'])), '+,d'):>11}"
+            )
+        lines.append("  (P(RT)=round-trip, P(BH)=bag-hold; Net EV in $/share at recommended pair)")
+
+    # PATH METRICS — what does the position experience along the way?
+    if path_metrics:
+        lines.append(hr("PATH-DEPENDENT RISK METRICS"))
+        lines.append(f"  Max drawdown from spot ${snapshot.spot:,.0f}:")
+        lines.append(f"    median: {path_metrics['max_dd_p50']*100:5.1f}% (${path_metrics['max_dd_price_p50']:,.0f} touched)")
+        lines.append(f"    p75:    {path_metrics['max_dd_p75']*100:5.1f}% (${path_metrics['max_dd_price_p75']:,.0f} touched)")
+        lines.append(f"    p90:    {path_metrics['max_dd_p90']*100:5.1f}% (${path_metrics['max_dd_price_p90']:,.0f} touched)")
+        lines.append(f"  Panic floor ${path_metrics['panic_floor_price']:,.0f} (30% below spot) touched: P = {path_metrics['p_panic_touched']*100:.0f}%")
+        if path_metrics.get("time_to_dip_p50") is not None:
+            lines.append(
+                f"  Time-to-dip (paths that touched): median {path_metrics['time_to_dip_p50']:.0f}d, "
+                f"p25/p75 {path_metrics['time_to_dip_p25']:.0f}d/{path_metrics['time_to_dip_p75']:.0f}d"
+            )
+        if path_metrics.get("time_to_rally_p50") is not None:
+            lines.append(
+                f"  Time-to-rally (paths that touched): median {path_metrics['time_to_rally_p50']:.0f}d, "
+                f"p25/p75 {path_metrics['time_to_rally_p25']:.0f}d/{path_metrics['time_to_rally_p75']:.0f}d"
+            )
 
     # AI SYNTHESIS
     lines.append(hr("AI TWO-PASS SYNTHESIS (Claude Opus 4.7)"))
@@ -1530,7 +1861,15 @@ def format_report(
     lines.append(hr("RELIABILITY COMPONENTS (assess each independently)"))
     lines.append(f"  Math methods agreement: {method_check['agreement_status']}")
     lines.append(f"  σ anchors: {vol_profile.anchors_count}/5 (divergence {vol_profile.divergence_pp:.1f}pp)")
-    lines.append(f"  GARCH α+β: {vol_profile.garch_alpha_plus_beta:.3f} {'(NEAR UNIT-ROOT)' if vol_profile.near_unit_root else '(stable)'}")
+    if vol_profile.garch_alpha_plus_beta > 0:
+        ab_label = (
+            "(NEAR UNIT-ROOT)" if vol_profile.near_unit_root
+            else "(high persistence)" if vol_profile.garch_alpha_plus_beta > 0.95
+            else "(stable)"
+        )
+        lines.append(f"  GARCH α+β: {vol_profile.garch_alpha_plus_beta:.3f} {ab_label}")
+    else:
+        lines.append(f"  GARCH α+β: fit failed")
     lines.append(f"  Drift signals active: {sum(1 for s in base_signals if s.confidence != 'LOW')}/{len(base_signals)} non-LOW")
     if pass1 and pass2:
         lines.append(f"  AI Pass1→Pass2 revision: {pass2.revision_from_prior_pass:+.1%} drift" if pass2.revision_from_prior_pass is not None else "  AI Pass1→Pass2 revision: n/a")
@@ -1916,16 +2255,14 @@ def run_pipeline(args) -> int:
         profile_beta = 1.0
     unusual_move = compute_unusual_move_z(history_df, beta=profile_beta, lookback=60)
 
-    # --- 2. Volatility profile ---
-    # v1 import behaviour: fit_garch_11(returns) returns SCALAR forecast variance
-    # (NOT a dict with alpha/beta keys). GARCH α+β diagnostic deferred to v3 —
-    # would require refitting separately or importing src/garch_model.py (sacred).
-    print("Computing volatility triangulation...")
-    forecast_var = fit_garch_11(returns)
-    if isinstance(forecast_var, (int, float)) and forecast_var > 0:
-        garch_sigma = float(np.sqrt(forecast_var * 252))
+    # --- 2. Volatility profile (full GARCH fit returns α, β, ω + variance) ---
+    print("Computing volatility triangulation (GARCH α+β fit)...")
+    garch = fit_garch_11_full(returns)
+    if garch["fit_ok"] and garch["forecast_variance"] > 0:
+        garch_sigma = float(np.sqrt(garch["forecast_variance"] * 252))
     else:
         garch_sigma = float(returns.tail(90).std() * np.sqrt(252)) if len(returns) >= 90 else 0.30
+    alpha_plus_beta = float(garch["alpha"] + garch["beta"])
 
     realized_vol_dict = compute_realized_vol(returns, windows=(30, 60, 90))
     iv_data = fetch_options_iv(ticker, target_dte_days=horizon_days)
@@ -1946,9 +2283,9 @@ def run_pipeline(args) -> int:
 
     vol_profile = VolatilityProfile(
         garch_sigma=garch_sigma,
-        garch_alpha=0.0,           # deferred to v3 (would need separate fit)
-        garch_beta=0.0,
-        garch_alpha_plus_beta=0.0,
+        garch_alpha=float(garch["alpha"]),
+        garch_beta=float(garch["beta"]),
+        garch_alpha_plus_beta=alpha_plus_beta,
         realized_30d=realized_vol_dict.get(30, garch_sigma),
         realized_60d=realized_vol_dict.get(60, garch_sigma),
         realized_90d=realized_vol_dict.get(90, garch_sigma),
@@ -1957,7 +2294,7 @@ def run_pipeline(args) -> int:
         blended_sigma=blended_sigma,
         anchors_count=anchors_count,
         divergence_pp=divergence_pp,
-        near_unit_root=False,      # deferred to v3 with α+β
+        near_unit_root=alpha_plus_beta > 0.98,
     )
 
     # --- 3. Drift base + 8 signals (v1 dict pattern) ---
@@ -2054,6 +2391,8 @@ def run_pipeline(args) -> int:
     }
 
     # AI analyst signal — weight scales with confidence (v2 spec)
+    # Pass 1's estimate enters here as a placeholder; Pass 2 may revise it below
+    # (before the blend) so Pass 2's correction actually drives the MC.
     if pass1:
         signals_dict["ai"] = {
             "drift": pass1.drift_estimate,
@@ -2065,7 +2404,48 @@ def run_pipeline(args) -> int:
     else:
         signals_dict["ai"] = _none_signal("AI Pass 1 failed")
 
-    # --- 6. Blend signals into today's drift ---
+    # --- 5b. AI Pass 2 (adversarial critique) — BEFORE final blend so it drives the MC ---
+    # Pass 2 needs marginal touch probabilities as context. We compute these
+    # via closed-form (cheap, no MC required) at ±10% from spot to ground Pass 2
+    # in the math without paying for a preliminary MC just for its prompt.
+    pass2 = None
+    pass2_cost_charged = 0.0
+    if args.no_ai:
+        print("AI Pass 2 skipped (--no-ai)")
+    elif pass1:
+        print("AI Pass 2 (adversarial critique — runs before final MC so Pass 2 drives the math)...")
+        T_years = horizon_days / 252.0
+        # Preliminary drift for closed-form: use Pass 1's estimate (will be revised by Pass 2)
+        prelim_mu_for_closed = float(pass1.drift_estimate)
+        try:
+            p_up_10 = closed_touch_up(spot, spot * 1.10, T_years, prelim_mu_for_closed, blended_sigma)
+            p_down_10 = closed_touch_down(spot, spot * 0.90, T_years, prelim_mu_for_closed, blended_sigma)
+            mc_marginal_summary = {
+                "p_up_10pct": f"{p_up_10*100:.0f}%",
+                "p_down_10pct": f"{p_down_10*100:.0f}%",
+            }
+        except Exception:
+            mc_marginal_summary = {"p_up_10pct": "n/a", "p_down_10pct": "n/a"}
+        sigma_summary = {"blended": blended_sigma, "divergence": divergence_pp}
+        pass2_prompt = build_ai_pass2_prompt(
+            ticker, snapshot, pass1, mc_marginal_summary, sigma_summary,
+            None,  # prior drift loaded later; Pass 2 sees Pass 1's view
+        )
+        pass2_raw, pass2_cost, _ = call_ai_pass(pass2_prompt, max_tokens=3000, pass_label="Pass 2")
+        pass2_cost_charged = pass2_cost
+        if pass2_raw:
+            pass2 = parse_ai_pass2(pass2_raw, pass1.drift_estimate, pass2_cost)
+            # Pass 2 WINS: replace the AI signal in the blend with Pass 2's revised estimate.
+            # Pass 1 is preserved on `pass1` for the audit trail / report.
+            signals_dict["ai"] = {
+                "drift": pass2.drift_estimate,
+                "confidence": pass2.confidence,
+                "source_quality": "REPUTABLE",
+                "sources_count": pass1.raw_sources_cited,
+                "notes": f"Pass 2 revised ({pass2.revision_from_prior_pass:+.1%} vs Pass 1)",
+            }
+
+    # --- 6. Blend signals into today's drift (Pass 2-revised AI signal) ---
     print(f"Blending {len(signals_dict)} signals + bull/bear arithmetic...")
     blend = blend_with_uncertainty(signals_dict, weights_dict=BLEND_WEIGHTS_V2)
     if blend and blend.get("blended") is not None:
@@ -2150,35 +2530,9 @@ def run_pipeline(args) -> int:
         vol_schedule=vol_schedule,
     )
 
-    # --- 12. AI Pass 2 (adversarial critique) ---
-    pass2 = None
-    if args.no_ai:
-        print("AI Pass 2 skipped (--no-ai)")
-    elif pass1 and best:
-        print("AI Pass 2 (adversarial critique)...")
-        # Compute marginal probs ONCE (cache to avoid duplicate MC analysis)
-        up_marginal = analyze_joint_conditional(
-            paths, spot, spot*0.5, spot*1.1, horizon_days,
-            sigma=effective_sigma, vol_schedule=vol_schedule,
-        )
-        down_marginal = analyze_joint_conditional(
-            paths, spot, spot*0.9, spot*1.5, horizon_days,
-            sigma=effective_sigma, vol_schedule=vol_schedule,
-        )
-        mc_marginal_summary = {
-            "p_up_10pct": f"{up_marginal['p_no_trade_rally_first'] + up_marginal['p_round_trip']:.0%}",
-            "p_down_10pct": f"{down_marginal['p_dip_touched_marginal']:.0%}",
-        }
-        sigma_summary = {"blended": blended_sigma, "divergence": vol_profile.divergence_pp}
-        pass2_prompt = build_ai_pass2_prompt(
-            ticker, snapshot, pass1, mc_marginal_summary, sigma_summary,
-            prior_v2["mu"] if prior_v2 else None,
-        )
-        pass2_raw, pass2_cost, _ = call_ai_pass(pass2_prompt, max_tokens=3000, pass_label="Pass 2")
-        if pass2_raw:
-            pass2 = parse_ai_pass2(pass2_raw, pass1.drift_estimate, pass2_cost)
-    else:
-        print("AI Pass 2 skipped (Pass 1 failed or no pair found)")
+    # --- 12. Pass 2 already ran before the blend (step 5b above), so MC uses
+    #          Pass 2's revised drift. Nothing more to do here. pass2 / pass2_cost_charged
+    #          carry through to total_ai_cost + report below.
 
     # --- 13. AI catalyst stress test ---
     catalyst_stress_results = []
@@ -2204,12 +2558,33 @@ def run_pipeline(args) -> int:
         method_check = {"table": [], "flags": [], "agreement_status": "n/a — no pair found",
                         "pde_mass_conservation": 1.0, "pde_p_neither": 0.0}
 
+    # --- 14b. Sensitivity table (drift/sigma swings + per-catalyst stress) ---
+    sensitivity = None
+    if best is not None:
+        print("Computing sensitivity table (drift/σ scenarios + catalyst shocks)...")
+        sensitivity = compute_sensitivity_table(
+            S0=spot, base_sigma=effective_sigma, base_mu=post_mu,
+            horizon_days=horizon_days,
+            dip_price=best.dip_price, rally_price=best.rally_price,
+            capital_usd=capital,
+            spread_per_share_round_trip=2.0,
+            catalyst_shocks=catalyst_stress_results,
+            vol_schedule_base=vol_schedule,
+            n_paths_sensitivity=10_000,
+        )
+
+    # --- 14c. Path-dependent metrics (max DD, panic floor, time-to-target) ---
+    path_metrics = None
+    if best is not None:
+        path_metrics = compute_path_metrics(paths, spot, best.dip_price, best.rally_price)
+
     # --- 15. Backtest layer ---
     backtest = run_backtest_layer(history_path, spot)
 
     # --- 16. Persist CSV row ---
-    # Surface ALL incurred AI cost — including Pass 1 that paid for input/web-search but failed to parse
-    total_ai_cost = pass1_cost_charged + (pass2.cost_usd if pass2 else 0) + catalyst_stress_cost
+    # Surface ALL incurred AI cost — Pass 1, Pass 2, catalyst stress test.
+    # Use the _charged trackers so failed-to-parse calls still show their cost.
+    total_ai_cost = pass1_cost_charged + pass2_cost_charged + catalyst_stress_cost
     csv_row = {
         "date": datetime.now().strftime("%Y-%m-%d"),
         "spot": f"{spot:.2f}",
@@ -2249,6 +2624,8 @@ def run_pipeline(args) -> int:
         total_ai_cost, runtime,
         met_threshold_strict=met_threshold_strict,
         unusual_move=unusual_move,
+        sensitivity=sensitivity,
+        path_metrics=path_metrics,
     )
     print(report)
 
