@@ -195,6 +195,17 @@ BAG_HOLD_TERMINAL_ASSUMPTION = "median_terminal_dip_paths"  # alt: "dip_price"
 # Backtest gate — minimum samples before calibration claims are made
 BACKTEST_MIN_SAMPLES = 30
 
+# Per-ticker peer overrides — quick fix so a ticker isn't compared to itself.
+# Option A (minimal). Option B replaces this with a full TICKER_CONFIG dict
+# covering vol-regime multipliers, catalyst Z threshold, grid resolution, etc.
+PEERS_BY_TICKER = {
+    "SNDK": ["MU", "WDC"],
+    "MU":   ["SNDK", "WDC"],
+    "WDC":  ["SNDK", "MU"],
+}
+DEFAULT_PEERS = ["MU", "WDC"]
+
+
 # v2 blend weights — 10 signals (v1's 9 less "ai" reweighted + 2 new AI-derived)
 # Total = 1.00 approximately; blend_with_uncertainty normalises by quality gating.
 BLEND_WEIGHTS_V2 = {
@@ -2327,7 +2338,8 @@ def run_pipeline(args) -> int:
     macro = fetch_macro_indicators(api_key)
     insider = fetch_insider_activity(ticker, api_key)
     short_data = fetch_short_interest(ticker, api_key)
-    peer_tickers = ["MU", "WDC"]
+    # Per-ticker peer selection — never compare a ticker to itself.
+    peer_tickers = [p for p in PEERS_BY_TICKER.get(ticker, DEFAULT_PEERS) if p != ticker]
     peer_dfs = fetch_peer_history(peer_tickers, api_key, lookback_days=60)
     self_earnings = fetch_next_earnings(ticker, api_key)
     self_earnings_dt = None
