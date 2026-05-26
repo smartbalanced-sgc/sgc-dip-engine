@@ -1,5 +1,5 @@
 """
-swing_analyzer_dipnrally.py — SanDisk Swing Trader (v2)
+swing_analyzer_dipnrally.py — Round-Trip Swing Trader (v2, multi-ticker)
 
 Round-trip dip-and-rally framework for high-volatility stocks. Sibling to
 swing_analyzer_analytic.py (v1), which solves a different problem (exit an
@@ -217,6 +217,8 @@ TICKER_CONFIG: dict[str, dict] = {
         "grid_max_reach_pct": 0.60,
         "conviction_dip": 0.65,
         "conviction_rally_cond": 0.75,
+        "spread_per_share_round_trip": 2.0,   # ~$1500 spot: $2 = 0.13% — typical
+        "blend_weights": None,                # use BLEND_WEIGHTS_V2 default
     },
     "MU": {
         "peers": ["SNDK", "WDC"],
@@ -233,6 +235,8 @@ TICKER_CONFIG: dict[str, dict] = {
         "grid_max_reach_pct": 0.50,
         "conviction_dip": 0.65,
         "conviction_rally_cond": 0.75,
+        "spread_per_share_round_trip": 1.0,   # ~$900 spot: $1 = 0.11% — typical large-cap
+        "blend_weights": None,
     },
     "WDC": {
         "peers": ["SNDK", "MU"],
@@ -247,6 +251,8 @@ TICKER_CONFIG: dict[str, dict] = {
         "grid_max_reach_pct": 0.40,
         "conviction_dip": 0.65,
         "conviction_rally_cond": 0.75,
+        "spread_per_share_round_trip": 0.30,  # ~$80 spot: $0.30 = 0.38% — mid-cap retail
+        "blend_weights": None,
     },
     "DEFAULT": {
         # Conservative defaults for any unmapped ticker. Tune via TICKER_CONFIG entry.
@@ -260,6 +266,8 @@ TICKER_CONFIG: dict[str, dict] = {
         "grid_max_reach_pct": 0.50,
         "conviction_dip": 0.65,
         "conviction_rally_cond": 0.75,
+        "spread_per_share_round_trip": 1.5,   # mid-range default
+        "blend_weights": None,
     },
 }
 
@@ -1437,7 +1445,10 @@ def scan_dip_rally_grid(
 
 def compute_path_metrics(paths: np.ndarray, S0: float, dip_price: float,
                           rally_price: float,
-                          panic_floor_mult: float = 0.70) -> dict:
+                          panic_floor_mult: float = 0.75) -> dict:
+    # NOTE: default 0.75 matches TICKER_CONFIG["DEFAULT"]["panic_floor_mult"].
+    # SNDK uses 0.70 via tcfg, MU uses 0.75, WDC uses 0.80 — pipeline always
+    # passes explicit value, so this default only fires if called standalone.
     """Extract path-dependent statistics from final 100k MC paths.
 
     Returns max-drawdown distribution, panic-floor touch probability, and
@@ -2573,7 +2584,9 @@ def run_pipeline(args) -> int:
 
     # --- 6. Blend signals into today's drift (Pass 2-revised AI signal) ---
     print(f"Blending {len(signals_dict)} signals + bull/bear arithmetic...")
-    blend = blend_with_uncertainty(signals_dict, weights_dict=BLEND_WEIGHTS_V2)
+    # Per-ticker blend weights override if specified in TICKER_CONFIG, else V2 defaults
+    active_blend_weights = tcfg.get("blend_weights") or BLEND_WEIGHTS_V2
+    blend = blend_with_uncertainty(signals_dict, weights_dict=active_blend_weights)
     if blend and blend.get("blended") is not None:
         today_mu = float(blend["blended"]) + factor_bias  # apply HIGH-factor net bias
         today_std = float(blend.get("std", 0.20))
@@ -2657,6 +2670,7 @@ def run_pipeline(args) -> int:
         grid_step=tcfg["grid_step"],
         grid_max_depth_pct=tcfg["grid_max_depth_pct"],
         grid_max_reach_pct=tcfg["grid_max_reach_pct"],
+        spread_per_share_round_trip=tcfg.get("spread_per_share_round_trip", 2.0),
     )
 
     # --- 12. Pass 2 already ran before the blend (step 5b above), so MC uses
@@ -2696,7 +2710,7 @@ def run_pipeline(args) -> int:
             horizon_days=horizon_days,
             dip_price=best.dip_price, rally_price=best.rally_price,
             capital_usd=capital,
-            spread_per_share_round_trip=2.0,
+            spread_per_share_round_trip=tcfg.get("spread_per_share_round_trip", 2.0),
             catalyst_shocks=catalyst_stress_results,
             vol_schedule_base=vol_schedule,
             n_paths_sensitivity=10_000,
@@ -2777,7 +2791,7 @@ def main():
     p = argparse.ArgumentParser(
         description="Round-Trip Swing Trader (v2) — multi-ticker dip-and-rally framework",
     )
-    p.add_argument("ticker", help="Ticker symbol (e.g. SNDK)")
+    p.add_argument("ticker", help="Ticker symbol (e.g. SNDK, MU, WDC). Per-ticker tunings live in TICKER_CONFIG.")
     p.add_argument("--capital", type=float, default=10000.0,
                    help="Capital to deploy per round-trip in USD (default 10000)")
     p.add_argument("--horizon", type=int, default=DEFAULT_HORIZON_DAYS,
