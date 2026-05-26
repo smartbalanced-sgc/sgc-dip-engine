@@ -130,40 +130,26 @@ DEFAULT_MC_PATHS = 100_000             # 200k auto-scale when P(dip) < 40%
 DEEP_DIP_AUTOSCALE_THRESHOLD = 0.40
 DEEP_DIP_AUTOSCALE_PATHS = 200_000
 
-# Asymmetric grid resolution: tighter near spot, coarser at extremes
-DIP_GRID_STEP = 10.0    # dollar step for dip scan
-RALLY_GRID_STEP = 10.0  # dollar step for rally scan
-DIP_GRID_MAX_DEPTH_PCT = 0.40   # scan down to spot * (1 - 0.40) = 60% of spot
-RALLY_GRID_MAX_REACH_PCT = 0.60 # scan up to spot * (1 + 0.60) = 160% of spot
+# NOTE: per-ticker AI vol_regime multipliers, catalyst Z thresholds, grid
+# resolution, and panic floor are now in TICKER_CONFIG (defined below).
+# The module-level constants AI_VOL_REGIME_MULTIPLIERS / CATALYST_Z_THRESHOLD
+# / DIP_GRID_STEP / etc. are kept (also defined below) as fallback defaults
+# but should not be referenced directly by ticker-aware code paths.
 
-# AI vol_regime → vol_mult mapping
-# v2-CALIBRATED, NOT INHERITED from src/monte_carlo.py:73-84 (which used
-# 0.75/1.0/1.30 tuned across the dip engine portfolio).
-# For SNDK σ=97% extreme regime, narrower band is appropriate — extreme
-# regime is already priced in, so AI vol_regime adds only marginal adjustment.
-AI_VOL_REGIME_MULTIPLIERS = {
-    "HIGH": 1.15,   # Post-earnings miss / catalyst risk → moderate widen
-    "MEDIUM": 1.00, # No adjustment
-    "LOW": 0.90,    # Post-beat / vol-collapse signal → moderate tighten
-}
-
-# Structural narrative score → drift adjustment (annualised pp)
+# Structural narrative score → drift adjustment (annualised pp). Ticker-invariant.
 NARRATIVE_DRIFT_ADJUSTMENT = {
     "strong": 0.05,   # +5pp drift (e.g. SNDK HBF + NVDA Vera Rubin link)
     "neutral": 0.00,
     "weak": -0.05,    # -5pp drift
 }
 
-# Bull/bear factor arithmetic weights (HIGH=3, MED=2, LOW=1)
+# Bull/bear factor arithmetic weights. Ticker-invariant.
 FACTOR_WEIGHTS = {"high": 3, "med": 2, "low": 1}
-FACTOR_NET_THRESHOLD = 4  # sum(HIGH bull) - sum(HIGH bear) > 4 → +5pp tail bias
-FACTOR_TAIL_BIAS = 0.05    # ±5pp drift bias when threshold exceeded
+FACTOR_NET_THRESHOLD = 4
+FACTOR_TAIL_BIAS = 0.05
 
-# Catalyst Z-score thresholds (pattern from src/sentiment.py:112)
-# For SNDK σ ≈ 97%, use high-vol threshold of 3.0
-CATALYST_Z_THRESHOLD = 3.0
-
-# Vol schedule multipliers around catalysts
+# Vol schedule multipliers around catalysts. Ticker-invariant — same earnings-day
+# vol-spike pattern applies regardless of ticker (pattern from src/monte_carlo.py).
 # Pattern from src/monte_carlo.py:155-202; values v2-tuned for SNDK
 VOL_SCHEDULE_MULTIPLIERS = {
     "self_earnings_day": 3.0,
@@ -195,15 +181,108 @@ BAG_HOLD_TERMINAL_ASSUMPTION = "median_terminal_dip_paths"  # alt: "dip_price"
 # Backtest gate — minimum samples before calibration claims are made
 BACKTEST_MIN_SAMPLES = 30
 
-# Per-ticker peer overrides — quick fix so a ticker isn't compared to itself.
-# Option A (minimal). Option B replaces this with a full TICKER_CONFIG dict
-# covering vol-regime multipliers, catalyst Z threshold, grid resolution, etc.
-PEERS_BY_TICKER = {
-    "SNDK": ["MU", "WDC"],
-    "MU":   ["SNDK", "WDC"],
-    "WDC":  ["SNDK", "MU"],
+# =============================================================================
+# TICKER_CONFIG — per-ticker tuning (Option B, full multi-ticker generalization)
+# =============================================================================
+# Each ticker gets its own parameters. Unknown tickers fall back to "DEFAULT".
+# Values derived from observed σ/regime profiles:
+#   - SNDK: extreme vol (~97%), post-parabola, σ-divergence tight, narrow AI vol bands
+#   - MU:   extreme vol (~94%) BUT vol-regime in transition (90d 80% → 30d 92%),
+#           wider divergence justifies wider AI vol bands
+#   - WDC:  more normal vol (~50%), wider drift cap protection unnecessary
+#   - DEFAULT: catch-all for any ticker not explicitly tuned
+#
+# Parameters:
+#   peers:                   non-self memory peers for peer_rs signal
+#   ai_vol_regime_mult:      {HIGH/MED/LOW} → effective σ multiplier
+#   catalyst_z_threshold:    |Z| threshold for unusual-move detection
+#   panic_floor_mult:        spot × N for path-metric "panic floor" display
+#   drift_cap:               max annualized drift before capping (binds → LOW conf)
+#   grid_step:               $ increment for dip/rally barrier grid
+#   grid_max_depth_pct:      how far below spot to scan for dip
+#   grid_max_reach_pct:      how far above spot to scan for rally
+#   conviction_dip:          P(touch dip) marginal threshold
+#   conviction_rally_cond:   P(rally | dip touched) conditional threshold
+# =============================================================================
+
+TICKER_CONFIG: dict[str, dict] = {
+    "SNDK": {
+        "peers": ["MU", "WDC"],
+        "ai_vol_regime_mult": {"HIGH": 1.15, "MEDIUM": 1.00, "LOW": 0.90},
+        "catalyst_z_threshold": 3.0,
+        "panic_floor_mult": 0.70,
+        "drift_cap": 1.0,
+        "grid_step": 10.0,
+        "grid_max_depth_pct": 0.40,
+        "grid_max_reach_pct": 0.60,
+        "conviction_dip": 0.65,
+        "conviction_rally_cond": 0.75,
+    },
+    "MU": {
+        "peers": ["SNDK", "WDC"],
+        # MU vol regime in transition (σ divergence 38pp observed) — wider AI band
+        "ai_vol_regime_mult": {"HIGH": 1.20, "MEDIUM": 1.00, "LOW": 0.85},
+        # MU β≈1.92 so adjusted-Z threshold can be lower than SNDK's high-vol 3.0
+        "catalyst_z_threshold": 2.5,
+        # MU panic floor at -25% — between SNDK's -30% (extreme) and normal-vol -20%
+        "panic_floor_mult": 0.75,
+        "drift_cap": 1.0,
+        # MU price ~$900 (vs SNDK ~$1500) — finer grid for percentage-equivalent resolution
+        "grid_step": 5.0,
+        "grid_max_depth_pct": 0.35,
+        "grid_max_reach_pct": 0.50,
+        "conviction_dip": 0.65,
+        "conviction_rally_cond": 0.75,
+    },
+    "WDC": {
+        "peers": ["SNDK", "MU"],
+        # WDC typically lower vol — use dip-engine's wider band
+        "ai_vol_regime_mult": {"HIGH": 1.30, "MEDIUM": 1.00, "LOW": 0.75},
+        "catalyst_z_threshold": 2.5,
+        "panic_floor_mult": 0.80,  # -20%, more sensible for normal-vol name
+        "drift_cap": 0.5,
+        # WDC price typically $50-100 — fine grid in absolute $ terms
+        "grid_step": 1.0,
+        "grid_max_depth_pct": 0.25,
+        "grid_max_reach_pct": 0.40,
+        "conviction_dip": 0.65,
+        "conviction_rally_cond": 0.75,
+    },
+    "DEFAULT": {
+        # Conservative defaults for any unmapped ticker. Tune via TICKER_CONFIG entry.
+        "peers": [],  # No peer signal available — peer_rs signal returns LOW conf
+        "ai_vol_regime_mult": {"HIGH": 1.20, "MEDIUM": 1.00, "LOW": 0.85},
+        "catalyst_z_threshold": 2.5,
+        "panic_floor_mult": 0.75,
+        "drift_cap": 1.0,
+        "grid_step": 5.0,
+        "grid_max_depth_pct": 0.30,
+        "grid_max_reach_pct": 0.50,
+        "conviction_dip": 0.65,
+        "conviction_rally_cond": 0.75,
+    },
 }
-DEFAULT_PEERS = ["MU", "WDC"]
+
+
+def get_ticker_config(ticker: str) -> dict:
+    """Return TICKER_CONFIG entry for `ticker` or DEFAULT fallback.
+    `ticker` is uppercased so lookups are case-insensitive.
+    The returned dict is the live config — DO NOT mutate it.
+    """
+    return TICKER_CONFIG.get(ticker.upper(), TICKER_CONFIG["DEFAULT"])
+
+
+# Legacy per-ticker constants kept as defaults for any code paths that haven't
+# been routed through get_ticker_config() yet. New code should always use the
+# config lookup rather than these globals.
+PEERS_BY_TICKER = {k: v["peers"] for k, v in TICKER_CONFIG.items() if k != "DEFAULT"}
+DEFAULT_PEERS = TICKER_CONFIG["DEFAULT"]["peers"] or ["MU", "WDC"]
+AI_VOL_REGIME_MULTIPLIERS = TICKER_CONFIG["DEFAULT"]["ai_vol_regime_mult"]
+CATALYST_Z_THRESHOLD = TICKER_CONFIG["DEFAULT"]["catalyst_z_threshold"]
+DIP_GRID_STEP = TICKER_CONFIG["DEFAULT"]["grid_step"]
+RALLY_GRID_STEP = TICKER_CONFIG["DEFAULT"]["grid_step"]
+DIP_GRID_MAX_DEPTH_PCT = TICKER_CONFIG["DEFAULT"]["grid_max_depth_pct"]
+RALLY_GRID_MAX_REACH_PCT = TICKER_CONFIG["DEFAULT"]["grid_max_reach_pct"]
 
 
 # v2 blend weights — 10 signals (v1's 9 less "ai" reweighted + 2 new AI-derived)
@@ -1192,14 +1271,14 @@ def compute_unusual_move_z(
     history_df: pd.DataFrame,
     beta: Optional[float] = 1.0,
     lookback: int = 60,
+    z_threshold: float = CATALYST_Z_THRESHOLD,
 ) -> Optional[dict]:
     """Beta-adjusted residual Z-score for today's return (pattern from
     src/sentiment.py:130-186, detect_catalysts trigger B/C).
 
-    A |Z| >= CATALYST_Z_THRESHOLD (3.0 for high-vol names) signals an unusual
-    move that may have a hidden catalyst. Used for situational awareness in
-    the report, not yet as a numeric drift signal (would need backtest data
-    to calibrate weight).
+    A |Z| >= z_threshold signals an unusual move that may have a hidden catalyst.
+    Default threshold is 3.0 (high-vol regime); typical-vol names use 2.5
+    (matches src/sentiment.py:112). Pass via TICKER_CONFIG.
 
     Returns dict {z_score, return_pct, beta, triggered} or None if insufficient data.
     """
@@ -1221,7 +1300,8 @@ def compute_unusual_move_z(
             "z_score": round(adjusted_z, 2),
             "return_pct": round(today_return * 100, 2),
             "beta": round(beta_safe, 2),
-            "triggered": adjusted_z >= CATALYST_Z_THRESHOLD,
+            "triggered": adjusted_z >= z_threshold,
+            "z_threshold_used": z_threshold,
         }
     except Exception:
         return None
@@ -1256,6 +1336,9 @@ def scan_dip_rally_grid(
     capital_usd: float = 10000.0,
     spread_per_share_round_trip: float = 2.0,
     vol_schedule: Optional[np.ndarray] = None,
+    grid_step: float = 10.0,
+    grid_max_depth_pct: float = 0.40,
+    grid_max_reach_pct: float = 0.60,
 ) -> tuple[Optional[JointConditionalResult], list[JointConditionalResult], bool]:
     """Scan the (dip × rally) grid with Brownian bridge correction.
 
@@ -1266,13 +1349,13 @@ def scan_dip_rally_grid(
                             False if `best` is a sub-threshold fallback
     """
     n_paths, n_days = paths.shape
-    dip_min = S0 * (1.0 - DIP_GRID_MAX_DEPTH_PCT)
+    dip_min = S0 * (1.0 - grid_max_depth_pct)
     dip_max = S0 * 0.99
     rally_min = S0 * 1.01
-    rally_max = S0 * (1.0 + RALLY_GRID_MAX_REACH_PCT)
+    rally_max = S0 * (1.0 + grid_max_reach_pct)
 
-    dip_grid = np.arange(dip_min, dip_max, DIP_GRID_STEP)
-    rally_grid = np.arange(rally_min, rally_max, RALLY_GRID_STEP)
+    dip_grid = np.arange(dip_min, dip_max, grid_step)
+    rally_grid = np.arange(rally_min, rally_max, grid_step)
 
     # ---- Precompute bridge-corrected first-touch days ONCE per barrier ----
     # This is the performance trick: rather than running bridge correction
@@ -1353,7 +1436,8 @@ def scan_dip_rally_grid(
 # =============================================================================
 
 def compute_path_metrics(paths: np.ndarray, S0: float, dip_price: float,
-                          rally_price: float) -> dict:
+                          rally_price: float,
+                          panic_floor_mult: float = 0.70) -> dict:
     """Extract path-dependent statistics from final 100k MC paths.
 
     Returns max-drawdown distribution, panic-floor touch probability, and
@@ -1366,8 +1450,9 @@ def compute_path_metrics(paths: np.ndarray, S0: float, dip_price: float,
     drawdowns = (running_max - paths) / running_max
     max_dd_per_path = drawdowns.max(axis=1)
 
-    # Panic floor: spot * 0.7 (30% below entry) — historically meaningful for SNDK
-    panic_floor = S0 * 0.7
+    # Panic floor: configurable via TICKER_CONFIG (e.g. -30% for SNDK extreme regime,
+    # -25% for MU regime-in-transition, -20% for normal-vol names like WDC).
+    panic_floor = S0 * panic_floor_mult
     p_panic_touched = float((paths.min(axis=1) <= panic_floor).mean())
 
     # Time-to-target distributions (conditional on touching)
@@ -1700,7 +1785,7 @@ def format_report(
     path_metrics: Optional[dict] = None,
 ) -> str:
     lines: list[str] = []
-    lines.append(hr(f"SANDISK SWING TRADER ({V2_VERSION}) — {snapshot.timestamp:%Y-%m-%d %H:%M}"))
+    lines.append(hr(f"ROUND-TRIP SWING TRADER ({V2_VERSION}) — {snapshot.ticker} — {snapshot.timestamp:%Y-%m-%d %H:%M}"))
     lines.append(f"  Ticker: {snapshot.ticker}")
     lines.append(f"  Spot: ${snapshot.spot:.2f}   Market cap: ${snapshot.market_cap/1e9:.1f}B")
     lines.append(f"  Sector / Industry: {snapshot.sector} / {snapshot.industry}")
@@ -1760,7 +1845,8 @@ def format_report(
         trigger = unusual_move["triggered"]
         flag_str = "  ⚠ TRIGGERED — investigate possible hidden catalyst" if trigger else "  ✓ within normal range"
         lines.append(f"  Today's return: {ret_pct:+.2f}%  |  beta: {beta:.2f}  |  Z (β-adj): {z:.2f}")
-        lines.append(f"  Threshold: |Z| ≥ {CATALYST_Z_THRESHOLD:.1f} for high-vol regime")
+        z_thresh_used = unusual_move.get("z_threshold_used", CATALYST_Z_THRESHOLD)
+        lines.append(f"  Threshold: |Z| ≥ {z_thresh_used:.1f} (per-ticker)")
         lines.append(flag_str)
         if trigger:
             lines.append("  (Pattern from src/sentiment.py — abnormal moves often precede / signal catalysts)")
@@ -1899,8 +1985,8 @@ def format_report(
     # FOOTER
     lines.append(hr())
     lines.append(f"  Runtime: {runtime_seconds:.1f}s  |  AI cost this run: ${total_ai_cost:.2f}")
-    lines.append(f"  History: tools/output/round_trip_history_SNDK.csv")
-    lines.append(f"  Dashboard: tools/output/sndk_dipnrally_dashboard.html")
+    lines.append(f"  History: tools/output/round_trip_history_{snapshot.ticker.upper()}.csv")
+    lines.append(f"  Dashboard: tools/output/{snapshot.ticker.lower()}_dipnrally_dashboard.html")
     lines.append("")
     return "\n".join(lines)
 
@@ -1976,7 +2062,7 @@ def generate_html_dashboard(
 <html lang="en">
 <head>
 <meta charset="utf-8">
-<title>SanDisk Swing Trader — {snapshot.timestamp:%Y-%m-%d}</title>
+<title>{snapshot.ticker} Swing Trader — {snapshot.timestamp:%Y-%m-%d}</title>
 <style>
   body {{ font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
          margin: 0; background: #0f1115; color: #e5e7eb; line-height: 1.5; }}
@@ -2013,7 +2099,7 @@ def generate_html_dashboard(
 </head>
 <body>
 <div class="container">
-  <h1>SanDisk Swing Trader</h1>
+  <h1>{snapshot.ticker} Swing Trader</h1>
   <div class="meta">{snapshot.ticker} @ ${snapshot.spot:.2f} · {snapshot.timestamp:%Y-%m-%d %H:%M}
     · σ {vol_profile.blended_sigma:.0%} · YTD {snapshot.ytd_return:+.0%}
     · thresholds {conviction_dip:.0%}/{conviction_rally_cond:.0%}
@@ -2046,7 +2132,7 @@ def generate_html_dashboard(
   {ai_block}
 
   <div class="footer">
-    SanDisk Swing Trader v2 · branch: claude/analyze-sandisk-trading-6zYxn · not for production trading without risk management
+    Round-Trip Swing Trader v2 · {snapshot.ticker} · branch: claude/analyze-sandisk-trading-6zYxn · not for production trading without risk management
   </div>
 </div>
 </body>
@@ -2269,13 +2355,28 @@ def run_pipeline(args) -> int:
         price_history=history_df,
     )
 
-    # Beta-adjusted unusual-move Z-score (pattern from src/sentiment.py)
+    # ---- Resolve per-ticker config (Option B) ----
+    # Used throughout the pipeline for AI vol_regime multipliers, catalyst Z
+    # threshold, panic floor, grid resolution, drift cap, conviction thresholds.
+    # Unknown tickers fall back to TICKER_CONFIG["DEFAULT"].
+    tcfg = get_ticker_config(ticker)
+    print(f"  Loaded ticker config for {ticker} "
+          f"(z_thresh={tcfg['catalyst_z_threshold']}, "
+          f"panic_floor={tcfg['panic_floor_mult']*100:.0f}%, "
+          f"grid_step=${tcfg['grid_step']:.1f}, "
+          f"peers={tcfg['peers'] or 'none'})")
+
+    # Beta-adjusted unusual-move Z-score (pattern from src/sentiment.py).
+    # z_threshold from ticker config.
     profile_beta = None
     try:
         profile_beta = float(profile.get("beta") or 1.0)
     except (TypeError, ValueError):
         profile_beta = 1.0
-    unusual_move = compute_unusual_move_z(history_df, beta=profile_beta, lookback=60)
+    unusual_move = compute_unusual_move_z(
+        history_df, beta=profile_beta, lookback=60,
+        z_threshold=tcfg["catalyst_z_threshold"],
+    )
 
     # --- 2. Volatility profile (full GARCH fit returns α, β, ω + variance) ---
     print("Computing volatility triangulation (GARCH α+β fit)...")
@@ -2321,7 +2422,7 @@ def run_pipeline(args) -> int:
 
     # --- 3. Drift base + 8 signals (v1 dict pattern) ---
     print("Computing 8 base drift signals (v1 import pattern)...")
-    DRIFT_CAP = 1.0  # matches v1's default --drift-cap
+    DRIFT_CAP = float(tcfg["drift_cap"])  # per-ticker (matches v1's --drift-cap)
     mu_hist = float(returns.mean() * 252)
     mu_capped = max(-DRIFT_CAP, min(DRIFT_CAP, mu_hist))
     enr = enrichment_drift(rsi, mom_5d)
@@ -2338,8 +2439,10 @@ def run_pipeline(args) -> int:
     macro = fetch_macro_indicators(api_key)
     insider = fetch_insider_activity(ticker, api_key)
     short_data = fetch_short_interest(ticker, api_key)
-    # Per-ticker peer selection — never compare a ticker to itself.
-    peer_tickers = [p for p in PEERS_BY_TICKER.get(ticker, DEFAULT_PEERS) if p != ticker]
+    # Per-ticker peer selection (from TICKER_CONFIG) — never self-compare.
+    peer_tickers = [p for p in tcfg["peers"] if p and p != ticker.upper()]
+    if not peer_tickers:
+        peer_tickers = [p for p in DEFAULT_PEERS if p != ticker.upper()]
     peer_dfs = fetch_peer_history(peer_tickers, api_key, lookback_days=60)
     self_earnings = fetch_next_earnings(ticker, api_key)
     self_earnings_dt = None
@@ -2524,7 +2627,7 @@ def run_pipeline(args) -> int:
 
     # --- 9. Apply AI vol_regime multiplier ---
     if pass1:
-        vol_mult = AI_VOL_REGIME_MULTIPLIERS.get(pass1.vol_regime, 1.0)
+        vol_mult = tcfg["ai_vol_regime_mult"].get(pass1.vol_regime, 1.0)
         effective_sigma = blended_sigma * vol_mult
     else:
         effective_sigma = blended_sigma
@@ -2551,6 +2654,9 @@ def run_pipeline(args) -> int:
         conviction_rally_cond=conviction_rally_cond,
         capital_usd=capital,
         vol_schedule=vol_schedule,
+        grid_step=tcfg["grid_step"],
+        grid_max_depth_pct=tcfg["grid_max_depth_pct"],
+        grid_max_reach_pct=tcfg["grid_max_reach_pct"],
     )
 
     # --- 12. Pass 2 already ran before the blend (step 5b above), so MC uses
@@ -2599,7 +2705,10 @@ def run_pipeline(args) -> int:
     # --- 14c. Path-dependent metrics (max DD, panic floor, time-to-target) ---
     path_metrics = None
     if best is not None:
-        path_metrics = compute_path_metrics(paths, spot, best.dip_price, best.rally_price)
+        path_metrics = compute_path_metrics(
+            paths, spot, best.dip_price, best.rally_price,
+            panic_floor_mult=tcfg["panic_floor_mult"],
+        )
 
     # --- 15. Backtest layer ---
     backtest = run_backtest_layer(history_path, spot)
@@ -2666,7 +2775,7 @@ def run_pipeline(args) -> int:
 
 def main():
     p = argparse.ArgumentParser(
-        description="SanDisk Swing Trader (v2) — round-trip dip-and-rally framework",
+        description="Round-Trip Swing Trader (v2) — multi-ticker dip-and-rally framework",
     )
     p.add_argument("ticker", help="Ticker symbol (e.g. SNDK)")
     p.add_argument("--capital", type=float, default=10000.0,
