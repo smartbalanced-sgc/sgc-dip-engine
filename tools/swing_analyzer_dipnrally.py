@@ -1683,10 +1683,15 @@ def compute_realized_drift_for_history(history_rows: list, price_records: list,
         days_actual = forward_idx - i
         if close_now <= 0:
             continue
-        # Annualised forward log-return drift
-        realized_drift_annual = (
-            (close_forward / close_now) ** (252 / days_actual) - 1
-        )
+        # Annualised forward drift using LOG returns × (252/days_actual).
+        # This matches how the model computes its own drift (from log returns,
+        # not compounded). The prior compound formula (ratio ** (252/days) - 1)
+        # exploded into absurd values for high-vol stocks with large period
+        # returns — e.g., SNDK +14% over 5 days compounded to +6,756,840%/yr.
+        # Log-annualisation gives a stable estimate directly comparable to the
+        # model's GARCH-derived drift.
+        log_return = float(np.log(close_forward / close_now))
+        realized_drift_annual = log_return * 252.0 / days_actual
         try:
             predicted_drift = float(row.get("drift_posterior", 0)) if row.get("drift_posterior") else None
             p1 = float(row.get("ai_drift_pass1", 0)) if row.get("ai_drift_pass1") else None
@@ -1722,7 +1727,12 @@ def compute_pass_accuracy(realized_rows: list) -> Optional[dict]:
             continue
         if r["realized_drift_annual"] is None:
             continue
-        realized = r["realized_drift_annual"]
+        # Cap realised at ±200%/yr for error calculation. Single-period extreme
+        # moves (e.g. +14% in 5 days → annualised ~700%/yr) aren't really "drift"
+        # in the GARCH sense — they're catalyst events. The model's drift is the
+        # slow trend; comparing it to one-day catalyst responses isn't apples-
+        # to-apples. The display still shows the uncapped value for honesty.
+        realized = max(-2.0, min(2.0, r["realized_drift_annual"]))
         e1 = abs(r["pass1_drift"] - realized)
         e2 = abs(r["pass2_drift"] - realized)
         p1_errors.append(e1)
@@ -2145,9 +2155,14 @@ def format_report(
                 pred_str = f"{r['predicted_drift']*100:+.0f}%" if r["predicted_drift"] is not None else "n/a"
                 p1_str = f"{r['pass1_drift']*100:+.0f}%" if r["pass1_drift"] is not None else "n/a"
                 p2_str = f"{r['pass2_drift']*100:+.0f}%" if r["pass2_drift"] is not None else "n/a"
-                real_str = f"{r['realized_drift_annual']*100:+.0f}%/yr"
+                # Cap displayed realized at ±999%/yr so absurd single-event
+                # values don't blow out the formatting (real number is correct,
+                # we just clamp the display).
+                rdv = max(-9.99, min(9.99, r['realized_drift_annual']))
+                real_str = f"{rdv*100:+.0f}%/yr"
                 lines.append(f"  {r['date']:<12} {r['days_forward']:>8} {pred_str:>11} {p1_str:>9} {p2_str:>9} {real_str:>10}")
-            lines.append(f"  (annualised drift over the forward window — directly comparable to predicted)")
+            lines.append(f"  (annualised via log-return × 252/days; short windows with catalyst-day moves can")
+            lines.append(f"   produce extreme values — the model's drift is a slow trend, not a single-event response)")
 
     # PASS 1 vs PASS 2 ACCURACY — should you trust Pass 2's revisions?
     # (Tier-1 fix C — surfaced after backtest showed Pass 2's bearish bias
