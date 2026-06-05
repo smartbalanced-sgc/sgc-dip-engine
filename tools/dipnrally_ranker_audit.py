@@ -321,18 +321,24 @@ def print_interpretation(rows: list):
             print(f"    (positive = EV picks farther rally — jackpot-bias tell)")
     print()
 
-    # Bucket interpretation per briefing thresholds, normalised
     print("  VERDICT against briefing's interpretation thresholds:")
-    if mean_frac >= 0.80:
-        print("    8-10/10-equivalent (≥0.80 fraction) → ALIGNED.")
-        print("    EV-as-ranker picks from the same region as hit-rate-ranker.")
-        print("    No architectural change needed.")
-    elif mean_frac >= 0.30:
-        print("    3-7/10-equivalent (0.30-0.79 fraction) → PARTIAL MISALIGNMENT.")
-        print("    Per briefing: investigate calibration before architecture change.")
+    print("  (using EV-pick == P-pick rate, NOT overlap fraction — the latter is")
+    print("   degenerate when k = n_qualified, which is the case here.)")
+    if multi_cand:
+        if same_pick_rate >= 0.80:
+            print("    ≥80% same-pick rate → ALIGNED.")
+            print("    EV-ranker and P-ranker pick the same pair in the qualifying region.")
+            print("    No architectural change needed.")
+        elif same_pick_rate >= 0.30:
+            print(f"    {same_pick_rate:.0%} same-pick rate → PARTIAL MISALIGNMENT.")
+            print("    Per briefing: investigate calibration or consider Stage 2 ranker change.")
+            print("    Current production: ranks by p_round_trip (mission-aligned, hit-rate).")
+        else:
+            print(f"    {same_pick_rate:.0%} same-pick rate → STRUCTURAL MISALIGNMENT.")
+            print("    Per briefing: ranker choice materially affects recommendations.")
+            print("    Current production: ranks by p_round_trip with EV tiebreak.")
     else:
-        print("    0-2/10-equivalent (<0.30 fraction) → STRUCTURAL MISALIGNMENT.")
-        print("    Per briefing: two-stage ranker fix warranted.")
+        print("    All valid setups are single-candidate — ranker choice doesn't apply.")
     print()
 
     # Critical context: did production thresholds produce thin qualifying space?
