@@ -147,57 +147,74 @@ def run_one_setup(setup: Setup) -> dict:
            and c.p_rally_given_dip >= CONVICTION_RALLY_COND
     ]
 
-    if len(qualified) < 10:
+    # Also keep a wider "relaxed" set for comparison context (use the production
+    # pre-filter slack of -8pp). This lets us see what the engine would consider
+    # if thresholds were slightly looser.
+    relaxed = [
+        c for c in candidates
+        if c.p_dip_touched >= (CONVICTION_DIP - 0.08)
+           and c.p_rally_given_dip >= (CONVICTION_RALLY_COND - 0.08)
+    ]
+
+    n_q = len(qualified)
+    n_r = len(relaxed)
+
+    # Handle truly empty case
+    if n_q == 0:
         return {
-            "label": setup.label,
-            "n_qualified": len(qualified),
-            "skip": True,
-            "skip_reason": "<10 qualified",
+            "label": setup.label, "n_qualified": 0, "n_relaxed": n_r,
+            "skip": True, "skip_reason": "no qualifying candidates",
         }
 
+    # If only 1 candidate, EV-pick == P-pick by definition
+    if n_q == 1:
+        only = qualified[0]
+        return {
+            "label": setup.label, "n_qualified": 1, "n_relaxed": n_r,
+            "skip": False, "single_candidate": True,
+            "ev_pick": _pick_dict(only, setup.spot),
+            "p_pick": _pick_dict(only, setup.spot),
+            "k_used": 1, "overlap_ev_p": 1, "overlap_ev_sharpe": 1, "overlap_p_sharpe": 1,
+        }
+
+    # For n ≥ 2, compute rankings + overlap using k = min(10, n_qualified)
     by_ev = sorted(qualified, key=rank_by_ev, reverse=True)
     by_prt = sorted(qualified, key=rank_by_p_round_trip, reverse=True)
     by_sharpe = sorted(qualified, key=rank_by_sharpe_equiv, reverse=True)
 
-    overlap_ev_p = overlap_topk(by_ev, by_prt, k=10)
-    overlap_ev_sharpe = overlap_topk(by_ev, by_sharpe, k=10)
-    overlap_p_sharpe = overlap_topk(by_prt, by_sharpe, k=10)
-
-    ev_top = by_ev[0]
-    p_top = by_prt[0]
+    k_used = min(10, n_q)
+    overlap_ev_p = overlap_topk(by_ev, by_prt, k=k_used)
+    overlap_ev_sharpe = overlap_topk(by_ev, by_sharpe, k=k_used)
+    overlap_p_sharpe = overlap_topk(by_prt, by_sharpe, k=k_used)
 
     return {
         "label": setup.label,
-        "spot": setup.spot,
-        "sigma": setup.sigma,
-        "mu": setup.mu,
-        "n_qualified": len(qualified),
+        "spot": setup.spot, "sigma": setup.sigma, "mu": setup.mu,
+        "n_qualified": n_q, "n_relaxed": n_r,
+        "k_used": k_used,
         "overlap_ev_p": overlap_ev_p,
         "overlap_ev_sharpe": overlap_ev_sharpe,
         "overlap_p_sharpe": overlap_p_sharpe,
-        "ev_pick": {
-            "dip": ev_top.dip_price,
-            "rally": ev_top.rally_price,
-            "dip_pct": (setup.spot - ev_top.dip_price) / setup.spot * 100,
-            "rally_pct": (ev_top.rally_price - setup.spot) / setup.spot * 100,
-            "p_dip": ev_top.p_dip_touched,
-            "p_rally_cond": ev_top.p_rally_given_dip,
-            "p_round_trip": ev_top.p_round_trip,
-            "ev": ev_top.net_expected_value,
-            "gain_per_share": ev_top.expected_gain_per_share,
-        },
-        "p_pick": {
-            "dip": p_top.dip_price,
-            "rally": p_top.rally_price,
-            "dip_pct": (setup.spot - p_top.dip_price) / setup.spot * 100,
-            "rally_pct": (p_top.rally_price - setup.spot) / setup.spot * 100,
-            "p_dip": p_top.p_dip_touched,
-            "p_rally_cond": p_top.p_rally_given_dip,
-            "p_round_trip": p_top.p_round_trip,
-            "ev": p_top.net_expected_value,
-            "gain_per_share": p_top.expected_gain_per_share,
-        },
+        "ev_pick": _pick_dict(by_ev[0], setup.spot),
+        "p_pick": _pick_dict(by_prt[0], setup.spot),
+        "ev_picks_match_p_pick": (by_ev[0].dip_price == by_prt[0].dip_price
+                                   and by_ev[0].rally_price == by_prt[0].rally_price),
         "skip": False,
+        "single_candidate": False,
+    }
+
+
+def _pick_dict(c: JointConditionalResult, spot: float) -> dict:
+    return {
+        "dip": c.dip_price,
+        "rally": c.rally_price,
+        "dip_pct": (spot - c.dip_price) / spot * 100,
+        "rally_pct": (c.rally_price - spot) / spot * 100,
+        "p_dip": c.p_dip_touched,
+        "p_rally_cond": c.p_rally_given_dip,
+        "p_round_trip": c.p_round_trip,
+        "ev": c.net_expected_value,
+        "gain_per_share": c.expected_gain_per_share,
     }
 
 
@@ -215,16 +232,25 @@ def print_header():
 
 def print_per_setup(rows: list):
     print("=" * 100)
-    print("PER-SETUP RESULTS")
+    print("PER-SETUP RESULTS (n_qualified at strict 65/75 + overlaps at k=min(10,n))")
     print("=" * 100)
-    print(f"  {'Setup':<32} {'Qual':>5} {'EV∩P':>5} {'EV∩Sh':>6} {'P∩Sh':>5}")
-    print(f"  {'-'*32} {'-'*5} {'-'*5} {'-'*6} {'-'*5}")
+    print(f"  {'Setup':<32} {'Strict':>6} {'Relax':>5} {'k':>3} {'EV∩P':>6} {'EV∩Sh':>6} {'P∩Sh':>6}")
+    print(f"  {'-'*32} {'-'*6} {'-'*5} {'-'*3} {'-'*6} {'-'*6} {'-'*6}")
     for r in rows:
         if r.get("skip"):
-            print(f"  {r['label']:<32} {r['n_qualified']:>5}   (skipped: {r['skip_reason']})")
+            print(f"  {r['label']:<32} {r['n_qualified']:>6} {r.get('n_relaxed', '?'):>5}     "
+                  f"(skipped: {r['skip_reason']})")
             continue
-        print(f"  {r['label']:<32} {r['n_qualified']:>5} {r['overlap_ev_p']:>3}/10 "
-              f"{r['overlap_ev_sharpe']:>4}/10 {r['overlap_p_sharpe']:>3}/10")
+        if r.get("single_candidate"):
+            print(f"  {r['label']:<32} {r['n_qualified']:>6} {r['n_relaxed']:>5} {'1':>3} "
+                  f"{'1/1':>6} {'1/1':>6} {'1/1':>6}  (only 1 pair qualified — rankers identical)")
+            continue
+        k = r["k_used"]
+        print(f"  {r['label']:<32} {r['n_qualified']:>6} {r['n_relaxed']:>5} {k:>3} "
+              f"{r['overlap_ev_p']:>3}/{k:<2} {r['overlap_ev_sharpe']:>3}/{k:<2} {r['overlap_p_sharpe']:>3}/{k:<2}")
+    print()
+    print("  Strict = n candidates clearing 65% dip AND 75% rally-cond (production thresholds)")
+    print("  Relax  = n candidates clearing 57% dip AND 67% rally-cond (production pre-filter slack)")
     print()
 
 
@@ -250,44 +276,78 @@ def print_pick_comparison(rows: list):
 def print_interpretation(rows: list):
     valid = [r for r in rows if not r.get("skip")]
     if not valid:
-        print("INTERPRETATION: No valid setups — investigate why no candidates qualify at 65/75 thresholds.")
+        print("INTERPRETATION: No setups had any qualifying candidates at 65/75 thresholds.")
+        print("                Architecture is so constrained that the candidate space is empty.")
+        print("                This itself is a finding — see the n_relaxed column for context.")
         return
 
-    overlaps_ev_p = [r["overlap_ev_p"] for r in valid]
-    mean_overlap = sum(overlaps_ev_p) / len(overlaps_ev_p)
-    min_overlap = min(overlaps_ev_p)
-    max_overlap = max(overlaps_ev_p)
+    # Separate single-candidate from multi-candidate
+    single_cand = [r for r in valid if r.get("single_candidate")]
+    multi_cand = [r for r in valid if not r.get("single_candidate")]
 
-    # Average rally-distance divergence
-    rally_diffs = [r["ev_pick"]["rally_pct"] - r["p_pick"]["rally_pct"] for r in valid]
-    mean_rally_diff = sum(rally_diffs) / len(rally_diffs)
+    # Normalise overlap to a fraction so we can average across different k values
+    fractions = []
+    for r in multi_cand:
+        k = r["k_used"]
+        fractions.append(r["overlap_ev_p"] / k)
+    for r in single_cand:
+        fractions.append(1.0)  # trivial: only 1 pair, both rankers pick it
+
+    mean_frac = sum(fractions) / len(fractions) if fractions else 0.0
+
+    # EV-pick vs P-pick agreement rate (more meaningful than overlap when k is small)
+    same_pick = sum(1 for r in multi_cand if r.get("ev_picks_match_p_pick"))
+    same_pick_rate = same_pick / len(multi_cand) if multi_cand else 1.0
+
+    # Rally-distance divergence (only meaningful when EV-pick ≠ P-pick)
+    rally_diffs = [r["ev_pick"]["rally_pct"] - r["p_pick"]["rally_pct"]
+                   for r in multi_cand if not r.get("ev_picks_match_p_pick")]
+    mean_rally_diff = sum(rally_diffs) / len(rally_diffs) if rally_diffs else 0.0
 
     print("=" * 100)
-    print("INTERPRETATION (per briefing)")
+    print("INTERPRETATION")
     print("=" * 100)
-    print(f"  Mean EV∩P top-10 overlap: {mean_overlap:.1f}/10  "
-          f"(min {min_overlap}/10, max {max_overlap}/10)")
-    print(f"  EV picks rally distance vs P picks: +{mean_rally_diff:+.1f}pp on average")
-    print(f"    (positive = EV picks farther rally; would indicate jackpot bias)")
+    print(f"  Valid setups (≥1 qualified): {len(valid)}/{len(rows)}")
+    print(f"  Single-candidate setups: {len(single_cand)} (EV/P trivially identical)")
+    print(f"  Multi-candidate setups:  {len(multi_cand)}")
+    print()
+    print(f"  Mean top-k EV∩P overlap fraction: {mean_frac:.2f} (1.00 = full agreement)")
+    if multi_cand:
+        print(f"  EV-pick exactly equals P-pick: {same_pick}/{len(multi_cand)} setups "
+              f"({same_pick_rate:.0%})")
+        if rally_diffs:
+            print(f"  When picks differ — EV rally distance vs P rally distance: "
+                  f"{mean_rally_diff:+.1f}pp")
+            print(f"    (positive = EV picks farther rally — jackpot-bias tell)")
     print()
 
-    if mean_overlap >= 8:
-        print("  VERDICT: 8-10/10 → EV-as-ranker is ALIGNED with hit-rate ranking.")
-        print("           No architectural change needed. This engine's two-stage filter")
-        print("           (65/75 thresholds + EV ranker) functions equivalently to")
-        print("           a P-ranker on this candidate space.")
-    elif mean_overlap >= 3:
-        print("  VERDICT: 3-7/10 → PARTIAL MISALIGNMENT.")
-        print("           Per briefing: investigate calibration before architecture change.")
-        print("           Specifically check: (1) is EV ranker pushing rally targets to")
-        print("           the 75%-conditional-threshold boundary? (2) would a P-ranker")
-        print("           with an EV floor give substantively different picks?")
+    # Bucket interpretation per briefing thresholds, normalised
+    print("  VERDICT against briefing's interpretation thresholds:")
+    if mean_frac >= 0.80:
+        print("    8-10/10-equivalent (≥0.80 fraction) → ALIGNED.")
+        print("    EV-as-ranker picks from the same region as hit-rate-ranker.")
+        print("    No architectural change needed.")
+    elif mean_frac >= 0.30:
+        print("    3-7/10-equivalent (0.30-0.79 fraction) → PARTIAL MISALIGNMENT.")
+        print("    Per briefing: investigate calibration before architecture change.")
     else:
-        print("  VERDICT: 0-2/10 → STRUCTURAL MISALIGNMENT.")
-        print("           Per briefing: two-stage ranker fix warranted.")
-        print("           Recommended change: among 65/75-qualifying candidates,")
-        print("           rank by p_round_trip (with EV floor for tie-break) instead")
-        print("           of net_expected_value.")
+        print("    0-2/10-equivalent (<0.30 fraction) → STRUCTURAL MISALIGNMENT.")
+        print("    Per briefing: two-stage ranker fix warranted.")
+    print()
+
+    # Critical context: did production thresholds produce thin qualifying space?
+    relaxed_counts = [r["n_relaxed"] for r in rows if r.get("n_relaxed") is not None]
+    strict_counts = [r["n_qualified"] for r in rows]
+    if strict_counts and relaxed_counts:
+        print(f"  CONTEXT: production 65/75 thresholds are highly restrictive.")
+        print(f"    Strict (65/75) qualifying candidates per setup: "
+              f"min {min(strict_counts)}, mean {sum(strict_counts)/len(strict_counts):.1f}, "
+              f"max {max(strict_counts)}")
+        print(f"    Relaxed (57/67) qualifying candidates per setup: "
+              f"min {min(relaxed_counts)}, mean {sum(relaxed_counts)/len(relaxed_counts):.1f}, "
+              f"max {max(relaxed_counts)}")
+        print(f"    The strict threshold is filtering ~{(1 - sum(strict_counts)/max(sum(relaxed_counts), 1))*100:.0f}% "
+              f"of relaxed candidates — the qualifying region is genuinely small.")
     print()
 
 
