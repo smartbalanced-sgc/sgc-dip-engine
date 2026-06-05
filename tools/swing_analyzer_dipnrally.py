@@ -1347,6 +1347,7 @@ def scan_dip_rally_grid(
     grid_step: float = 10.0,
     grid_max_depth_pct: float = 0.40,
     grid_max_reach_pct: float = 0.60,
+    dip_floor: Optional[float] = None,
 ) -> tuple[Optional[JointConditionalResult], list[JointConditionalResult], bool]:
     """Scan the (dip × rally) grid with Brownian bridge correction.
 
@@ -1387,6 +1388,11 @@ def scan_dip_rally_grid(
 
     candidates: list[JointConditionalResult] = []
     for i, dip in enumerate(dip_grid):
+        # Tier-1 fix A: trend-aware dip floor. When set, skip candidates with
+        # dip prices below the floor (prevents anchoring dips below where a
+        # rallying stock will realistically reach in the horizon).
+        if dip_floor is not None and float(dip) < dip_floor:
+            continue
         for j, rally in enumerate(rally_grid):
             result = analyze_joint_conditional(
                 paths, S0, float(dip), float(rally), horizon_days,
@@ -1605,6 +1611,138 @@ def compute_sensitivity_table(
             "net_ev_total": net_ev_per_share * shares,
         })
     return rows
+
+
+def compute_buy_hold_comparison(paths: np.ndarray, S0: float, capital: float,
+                                  spread_per_share_round_trip: float) -> dict:
+    """Tier-1 fix D: compute expected P&L if the user instead bought at today's
+    spot and held to horizon-end. Lets the user see the opportunity cost of
+    waiting for a dip-and-rally setup.
+
+    Uses the existing MC paths' terminal distribution. Spread cost subtracted
+    once (single round-trip on the buy-hold position, regardless of horizon).
+    """
+    terminals = paths[:, -1]
+    median_terminal = float(np.median(terminals))
+    p25_terminal = float(np.percentile(terminals, 25))
+    p75_terminal = float(np.percentile(terminals, 75))
+    p5_terminal = float(np.percentile(terminals, 5))
+    p95_terminal = float(np.percentile(terminals, 95))
+    shares = capital / S0
+    median_pnl = shares * (median_terminal - S0 - spread_per_share_round_trip)
+    p_positive = float((terminals > S0).mean())
+    return {
+        "shares": shares,
+        "median_terminal": median_terminal,
+        "p25_terminal": p25_terminal,
+        "p75_terminal": p75_terminal,
+        "p5_terminal": p5_terminal,
+        "p95_terminal": p95_terminal,
+        "median_pnl": median_pnl,
+        "p_positive_at_horizon": p_positive,
+    }
+
+
+def compute_realized_drift_for_history(history_rows: list, price_records: list,
+                                        days_ahead: int = 5) -> list:
+    """Tier-1 fix B + C: for each historical row, compute realized N-day forward
+    drift after the recommendation date. Returns list of dicts with row date,
+    predicted drift_posterior, realized forward drift, pass1/pass2 drifts.
+
+    Used to surface model calibration accuracy (predicted vs realized) and to
+    track Pass 1 vs Pass 2 accuracy.
+    """
+    # Build date → close lookup
+    by_date = {r["Date"]: float(r["Close"]) for r in price_records}
+    sorted_dates = sorted(by_date.keys())
+
+    out = []
+    for row in history_rows:
+        rec_date = row.get("date", "")
+        if not rec_date:
+            continue
+        if rec_date not in by_date:
+            # Recommendation date may have been a non-trading day (weekend run);
+            # find the closest available trading-day close ≥ rec_date.
+            candidates = [d for d in sorted_dates if d >= rec_date]
+            if not candidates:
+                continue
+            rec_date_actual = candidates[0]
+        else:
+            rec_date_actual = rec_date
+        # Find the close N trading days after the rec date
+        try:
+            i = sorted_dates.index(rec_date_actual)
+        except ValueError:
+            continue
+        forward_idx = min(i + days_ahead, len(sorted_dates) - 1)
+        if forward_idx <= i:
+            continue  # no forward data
+        close_now = by_date[rec_date_actual]
+        close_forward = by_date[sorted_dates[forward_idx]]
+        days_actual = forward_idx - i
+        if close_now <= 0:
+            continue
+        # Annualised forward log-return drift
+        realized_drift_annual = (
+            (close_forward / close_now) ** (252 / days_actual) - 1
+        )
+        try:
+            predicted_drift = float(row.get("drift_posterior", 0)) if row.get("drift_posterior") else None
+            p1 = float(row.get("ai_drift_pass1", 0)) if row.get("ai_drift_pass1") else None
+            p2 = float(row.get("ai_drift_pass2", 0)) if row.get("ai_drift_pass2") else None
+        except (TypeError, ValueError):
+            predicted_drift = p1 = p2 = None
+        out.append({
+            "date": rec_date,
+            "close_at_rec": close_now,
+            "close_forward": close_forward,
+            "days_forward": days_actual,
+            "realized_drift_annual": realized_drift_annual,
+            "predicted_drift": predicted_drift,
+            "pass1_drift": p1,
+            "pass2_drift": p2,
+        })
+    return out
+
+
+def compute_pass_accuracy(realized_rows: list) -> Optional[dict]:
+    """Tier-1 fix C: aggregate Pass 1 vs Pass 2 accuracy across resolved rows.
+
+    For each row with both pass drifts and a realized forward drift, determine
+    which pass was closer. Report tally and mean absolute error.
+    """
+    p1_closer = 0
+    p2_closer = 0
+    p1_errors = []
+    p2_errors = []
+    revision_directions = []  # signed: +pp = Pass 2 lower than Pass 1 (bearish revision)
+    for r in realized_rows:
+        if r["pass1_drift"] is None or r["pass2_drift"] is None:
+            continue
+        if r["realized_drift_annual"] is None:
+            continue
+        realized = r["realized_drift_annual"]
+        e1 = abs(r["pass1_drift"] - realized)
+        e2 = abs(r["pass2_drift"] - realized)
+        p1_errors.append(e1)
+        p2_errors.append(e2)
+        if e1 < e2:
+            p1_closer += 1
+        elif e2 < e1:
+            p2_closer += 1
+        revision_directions.append(r["pass2_drift"] - r["pass1_drift"])
+    n = p1_closer + p2_closer
+    if n == 0:
+        return None
+    return {
+        "n": n,
+        "p1_closer": p1_closer,
+        "p2_closer": p2_closer,
+        "p1_mean_abs_error": sum(p1_errors) / max(len(p1_errors), 1),
+        "p2_mean_abs_error": sum(p2_errors) / max(len(p2_errors), 1),
+        "mean_pass2_revision": sum(revision_directions) / max(len(revision_directions), 1),
+    }
 
 
 def run_backtest_layer(history_path: Path, current_price: float) -> dict:
@@ -1828,6 +1966,10 @@ def format_report(
     unusual_move: Optional[dict] = None,
     sensitivity: Optional[list[dict]] = None,
     path_metrics: Optional[dict] = None,
+    buy_hold: Optional[dict] = None,
+    realized_history: Optional[list[dict]] = None,
+    pass_accuracy: Optional[dict] = None,
+    dip_floor_active: bool = False,
 ) -> str:
     lines: list[str] = []
     lines.append(hr(f"ROUND-TRIP SWING TRADER ({V2_VERSION}) — {snapshot.ticker} — {snapshot.timestamp:%Y-%m-%d %H:%M}"))
@@ -1855,6 +1997,10 @@ def format_report(
             lines.append("  ⚠ NEGATIVE EXPECTED VALUE — thresholds met BUT average outcome loses money.")
             lines.append(f"  ⚠ Bag-hold scenario (P={best.p_bag_hold:.0%}, ${best.expected_bag_hold_loss:,.0f}/share loss) dominates the gain.")
             lines.append("  ⚠ Consider waiting for a higher-EV setup or skipping this trade.")
+            lines.append("")
+        if dip_floor_active:
+            lines.append(f"  ℹ Trend-aware dip floor active (5d+30d momentum strongly positive).")
+            lines.append(f"  ℹ Dip target capped at spot × 0.97 to prevent unreachable anchor during rally.")
             lines.append("")
         shares = capital_usd / best.dip_price
         lines.append(f"  Dip buy-limit:    ${best.dip_price:,.0f}  (P(touch within {horizon_days}d) = {best.p_dip_touched:.1%}, expected day {best.expected_days_to_dip:.0f})")
@@ -1966,6 +2112,63 @@ def format_report(
                 f"  Time-to-rally (paths that touched): median {path_metrics['time_to_rally_p50']:.0f}d, "
                 f"p25/p75 {path_metrics['time_to_rally_p25']:.0f}d/{path_metrics['time_to_rally_p75']:.0f}d"
             )
+
+    # BUY-AND-HOLD COMPARISON — opportunity cost of waiting for the swing setup
+    # (Tier-1 fix D — surfaced after empirical 15-day backtest showed model's
+    # discipline cost real upside in trending markets)
+    if buy_hold:
+        lines.append(hr("BUY-AND-HOLD COMPARISON (opportunity cost of waiting for setup)"))
+        lines.append(f"  If you bought {buy_hold['shares']:.1f} shares at ${snapshot.spot:,.0f} TODAY and held to horizon ({horizon_days}d):")
+        lines.append(f"    Expected median terminal: ${buy_hold['median_terminal']:,.0f}  "
+                     f"(p25/p75: ${buy_hold['p25_terminal']:,.0f}/${buy_hold['p75_terminal']:,.0f})")
+        lines.append(f"    P(positive at horizon): {buy_hold['p_positive_at_horizon']*100:.0f}%")
+        bh_pnl = buy_hold['median_pnl']
+        bh_label = f"+${bh_pnl:,.0f}" if bh_pnl >= 0 else f"-${abs(bh_pnl):,.0f}"
+        lines.append(f"    Expected median P&L: {bh_label}")
+        if best:
+            rt_ev = best.net_expected_value
+            advantage = bh_pnl - rt_ev
+            if advantage > 0:
+                lines.append(f"  ⚠ Buy-and-hold beats round-trip recommendation by ${advantage:,.0f}")
+                lines.append(f"  ⚠ The round-trip pair has Net EV ${rt_ev:+,.0f} vs buy-hold {bh_label}.")
+                lines.append(f"  ⚠ Consider buy-and-hold for this setup unless mean-reversion is your specific thesis.")
+
+    # REALIZED DRIFT vs PREDICTED — calibration feedback from CSV history
+    # (Tier-1 fix B — surfaced after backtest showed Pass 2 systematically
+    # underestimating drift during sustained rallies)
+    if realized_history:
+        resolved_rows = [r for r in realized_history if r.get("days_forward", 0) >= 3]
+        if resolved_rows:
+            lines.append(hr("REALIZED vs PREDICTED DRIFT (calibration feedback from CSV history)"))
+            lines.append(f"  {'Date':<12} {'Days fwd':>8} {'Predicted':>11} {'Pass 1':>9} {'Pass 2':>9} {'Realized':>10}")
+            for r in resolved_rows[-10:]:  # last 10 only
+                pred_str = f"{r['predicted_drift']*100:+.0f}%" if r["predicted_drift"] is not None else "n/a"
+                p1_str = f"{r['pass1_drift']*100:+.0f}%" if r["pass1_drift"] is not None else "n/a"
+                p2_str = f"{r['pass2_drift']*100:+.0f}%" if r["pass2_drift"] is not None else "n/a"
+                real_str = f"{r['realized_drift_annual']*100:+.0f}%/yr"
+                lines.append(f"  {r['date']:<12} {r['days_forward']:>8} {pred_str:>11} {p1_str:>9} {p2_str:>9} {real_str:>10}")
+            lines.append(f"  (annualised drift over the forward window — directly comparable to predicted)")
+
+    # PASS 1 vs PASS 2 ACCURACY — should you trust Pass 2's revisions?
+    # (Tier-1 fix C — surfaced after backtest showed Pass 2's bearish bias
+    # was systematically wrong during the recent rally)
+    if pass_accuracy and pass_accuracy["n"] >= 2:
+        lines.append(hr("AI PASS 1 vs PASS 2 ACCURACY (which pass should you trust?)"))
+        pa = pass_accuracy
+        lines.append(f"  Sample size: {pa['n']} resolved comparisons")
+        lines.append(f"  Pass 1 was closer to realised drift: {pa['p1_closer']}/{pa['n']} ({pa['p1_closer']/max(pa['n'],1)*100:.0f}%)")
+        lines.append(f"  Pass 2 was closer to realised drift: {pa['p2_closer']}/{pa['n']} ({pa['p2_closer']/max(pa['n'],1)*100:.0f}%)")
+        lines.append(f"  Mean absolute error:  Pass 1 = {pa['p1_mean_abs_error']*100:.0f}pp  |  Pass 2 = {pa['p2_mean_abs_error']*100:.0f}pp")
+        lines.append(f"  Mean Pass 2 revision: {pa['mean_pass2_revision']*100:+.0f}pp (negative = Pass 2 typically lower than Pass 1)")
+        if pa['n'] >= 5:
+            if pa['p1_closer'] > pa['p2_closer'] * 1.5:
+                lines.append(f"  ⚠ Pass 1 has been more accurate. Pass 2's revisions may be over-correcting in current regime.")
+            elif pa['p2_closer'] > pa['p1_closer'] * 1.5:
+                lines.append(f"  ✓ Pass 2's adversarial revisions are tracking realised drift better.")
+            else:
+                lines.append(f"  ~ Pass 1 and Pass 2 are roughly equally accurate. Two-pass design adds modest value.")
+        else:
+            lines.append(f"  (need ≥5 samples for trustworthy comparison; current sample is small)")
 
     # AI SYNTHESIS
     lines.append(hr("AI TWO-PASS SYNTHESIS (Claude Opus 4.7)"))
@@ -2696,6 +2899,18 @@ def run_pipeline(args) -> int:
     )
 
     # --- 11. Scan grid for best pair (bridge-corrected) ---
+    # Tier-1 fix A: trend-aware dip floor. When the stock is in a sustained
+    # rally (5d momentum > +5% AND 30d momentum > +30%), the model has shown
+    # a tendency to anchor dip targets at unreachable depths (the stock keeps
+    # rising past them). Floor the dip target at spot × 0.97 to prevent this.
+    dip_floor = None
+    dip_floor_active = False
+    if mom_5d > 0.05 and mom_30d > 0.30:
+        dip_floor = spot * 0.97
+        dip_floor_active = True
+        print(f"  Trend-aware dip floor active (5d_mom={mom_5d:+.1%}, 30d_mom={mom_30d:+.1%}): "
+              f"floor=${dip_floor:.0f} (3% below spot)")
+
     print("Scanning dip × rally grid (Brownian bridge correction)...")
     best, all_candidates, met_threshold_strict = scan_dip_rally_grid(
         S0=spot, sigma=effective_sigma, mu=post_mu, horizon_days=horizon_days,
@@ -2708,6 +2923,7 @@ def run_pipeline(args) -> int:
         grid_max_depth_pct=tcfg["grid_max_depth_pct"],
         grid_max_reach_pct=tcfg["grid_max_reach_pct"],
         spread_per_share_round_trip=tcfg.get("spread_per_share_round_trip", 2.0),
+        dip_floor=dip_floor,
     )
 
     # --- 12. Pass 2 already ran before the blend (step 5b above), so MC uses
@@ -2761,6 +2977,37 @@ def run_pipeline(args) -> int:
             panic_floor_mult=tcfg["panic_floor_mult"],
         )
 
+    # --- 14d. Buy-and-hold comparison (Tier-1 fix D) ---
+    # Honest alternative: if you bought at today's spot and held to horizon end,
+    # what's the expected P&L? Lets you see opportunity cost of waiting for setup.
+    buy_hold = compute_buy_hold_comparison(
+        paths, spot, capital,
+        tcfg.get("spread_per_share_round_trip", 2.0),
+    )
+
+    # --- 14e. Realized drift + Pass 1/2 accuracy from CSV history (Tier-1 fix B, C) ---
+    # For each prior recommendation in the CSV, compute what realized 5-day
+    # forward drift actually was. Compare to model's predicted drift and to
+    # each AI Pass's drift. Lets the user see WHERE the model has been wrong.
+    if history_path.exists():
+        with open(history_path, "r") as _f:
+            history_rows_for_drift = [r for r in csv.DictReader(_f) if r.get("date")]
+    else:
+        history_rows_for_drift = []
+    # Convert Date Timestamps to YYYY-MM-DD strings for lookup
+    price_records_for_drift = []
+    for rec in history_df.to_dict("records"):
+        date_val = rec.get("Date")
+        if hasattr(date_val, "strftime"):
+            rec = {**rec, "Date": date_val.strftime("%Y-%m-%d")}
+        else:
+            rec = {**rec, "Date": str(date_val)[:10]}
+        price_records_for_drift.append(rec)
+    realized_history = compute_realized_drift_for_history(
+        history_rows_for_drift, price_records_for_drift, days_ahead=5,
+    )
+    pass_accuracy = compute_pass_accuracy(realized_history)
+
     # --- 15. Backtest layer ---
     backtest = run_backtest_layer(history_path, spot)
 
@@ -2809,6 +3056,10 @@ def run_pipeline(args) -> int:
         unusual_move=unusual_move,
         sensitivity=sensitivity,
         path_metrics=path_metrics,
+        buy_hold=buy_hold,
+        realized_history=realized_history,
+        pass_accuracy=pass_accuracy,
+        dip_floor_active=dip_floor_active,
     )
     print(report)
 
