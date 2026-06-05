@@ -1350,8 +1350,16 @@ def scan_dip_rally_grid(
 ) -> tuple[Optional[JointConditionalResult], list[JointConditionalResult], bool]:
     """Scan the (dip × rally) grid with Brownian bridge correction.
 
+    Two-stage ranker:
+      Stage 1 — strict filter: candidates must meet both probability thresholds
+        (p_dip_touched ≥ conviction_dip AND p_rally_given_dip ≥ conviction_rally_cond)
+      Stage 2 — rank by joint round-trip probability descending, EV tiebreak
+        (mission-aligned with "lock in gains" / "defensible round-trips")
+      Fallback when no candidates clear Stage 1: rank by EV among relaxed
+        pre-filter set so BELOW-THRESHOLD warning fires with a sensible best.
+
     Returns: (best, candidates, met_threshold_strict).
-      best: highest net_expected_value pair (qualified if any, else fallback)
+      best: highest-P pair (qualified if any, else highest-EV fallback)
       candidates: all pairs evaluated
       met_threshold_strict: True if `best` strictly met both conviction thresholds;
                             False if `best` is a sub-threshold fallback
@@ -1427,10 +1435,36 @@ def scan_dip_rally_grid(
         if c.p_dip_touched >= conviction_dip and c.p_rally_given_dip >= conviction_rally_cond
     ]
     if qualified:
-        qualified.sort(key=lambda c: c.net_expected_value, reverse=True)
+        # Stage 2 ranker — sort by joint round-trip probability descending,
+        # tiebreak by net_expected_value descending.
+        #
+        # Mission alignment (per SNDK_SWING_TOOL.md): "lock in gains via
+        # defensible round-trips" / "high-conviction setups" — this is
+        # hit-rate language, NOT portfolio-return-maximisation language.
+        #
+        # Sibling-engine diagnostic (dipnrally_ranker_audit.py) confirmed
+        # partial misalignment: under prior EV-as-ranker, 5/6 multi-candidate
+        # setups had EV-pick ≠ P-pick. EV ranker chose deeper-dip / narrower-
+        # rally setups (~$6/share higher EV) while P ranker chose shallower-
+        # dip / wider-rally setups (~+5pp higher joint completion probability).
+        #
+        # Switched to P-ranker because: trade frequency × completion rate
+        # matters more than per-trade dollar maximum for the stated mission.
+        # The $6/share EV cost is below MC sampling noise; the +5pp completion
+        # gain is meaningful when compounded across multiple round-trips.
+        # Negative-EV warning system remains intact — still fires when the
+        # best P-ranked candidate has Net EV < 0.
+        qualified.sort(
+            key=lambda c: (c.p_round_trip, c.net_expected_value),
+            reverse=True,
+        )
         best = qualified[0]
         met_threshold_strict = True
     else:
+        # Fallback when no candidates clear strict 65/75 thresholds: keep
+        # EV-ranking among the relaxed pre-filter set so the BELOW-THRESHOLD
+        # warning fires with a sensible (highest-EV-among-below-threshold)
+        # candidate to report. Switching ranker here would hide information.
         candidates_sorted = sorted(candidates, key=lambda c: c.net_expected_value, reverse=True)
         best = candidates_sorted[0] if candidates_sorted else None
         met_threshold_strict = False
