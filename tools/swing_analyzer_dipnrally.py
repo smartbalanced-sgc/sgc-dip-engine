@@ -1231,8 +1231,17 @@ def signal_from_catalyst_proximity(catalysts: list[dict], horizon_days: int) -> 
 
     today = datetime.now().date()
     horizon_end = today + timedelta(days=horizon_days)
-    mag_map = {"high": 0.10, "med": 0.05, "low": 0.02}
-    dir_sign = {"bullish": 1.0, "bearish": -1.0, "two-sided": 0.0}
+    # Synonyms — AI Pass 1 has been observed using "down" / "up" / "bear" /
+    # "bull" in addition to the prompt-specified "bullish" / "bearish" /
+    # "two-sided". Map all common variants to the canonical sign.
+    mag_map = {
+        "high": 0.10, "med": 0.05, "medium": 0.05, "low": 0.02,
+    }
+    dir_sign = {
+        "bullish": 1.0, "bull": 1.0, "up": 1.0, "positive": 1.0,
+        "bearish": -1.0, "bear": -1.0, "down": -1.0, "negative": -1.0,
+        "two-sided": 0.0, "twosided": 0.0, "neutral": 0.0, "mixed": 0.0, "": 0.0,
+    }
 
     total = 0.0
     in_window_count = 0
