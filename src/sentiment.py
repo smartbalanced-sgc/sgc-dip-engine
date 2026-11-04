@@ -230,7 +230,7 @@ REASON: [max 80 chars citing specific data above]"""
 
     try:
         response = client.messages.create(
-            model="claude-sonnet-4-20250514",
+            model="claude-haiku-5-5",
             max_tokens=80,
             messages=[{"role": "user", "content": prompt}]
         )
@@ -278,7 +278,7 @@ REASON: [max 80 chars]"""
 
     try:
         response = client.messages.create(
-            model="claude-sonnet-4-20250514",
+            model="claude-haiku-5-5",
             max_tokens=60,
             messages=[{"role": "user", "content": prompt}]
         )
@@ -346,7 +346,7 @@ REASON: [max 200 chars — name top source explicitly, e.g.,
 
     try:
         response = client.messages.create(
-            model="claude-sonnet-4-20250514",
+            model="claude-sonnet-5-5",
             max_tokens=300,  # §2026-05-15: raised for 5-line structured output
             tools=[{
                 "type": "web_search_20250305",
@@ -415,7 +415,7 @@ RANK: TICKER - [max 60 chars reason citing data above]"""
 
     try:
         response = client.messages.create(
-            model="claude-sonnet-4-20250514",
+            model="claude-haiku-5-5",
             max_tokens=100,
             messages=[{"role": "user", "content": prompt}]
         )

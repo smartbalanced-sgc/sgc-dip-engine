@@ -452,7 +452,7 @@ regime_classifier:
     # 2. Stock has not been researched in last N hours (caching)
     cache_hours: 48
     # Model & cost guardrails
-    model: "claude-sonnet-4-20250514"
+    model: "claude-sonnet-5-5"
     max_tokens: 600
     # Hard daily cap to prevent runaway costs (USD)
     daily_cost_cap_usd: 5.00
