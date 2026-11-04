@@ -342,7 +342,7 @@ def _ai_disambiguate_regime(ticker, stock_data, rule_result, client, cost_tracke
     rsi_str = f"{rsi:.0f}" if rsi is not None else "N/A"
     
     model = get_config('regime_classifier', 'ai_research', 'model',
-                       default='claude-sonnet-4-20250514')
+                       default='claude-sonnet-5-5')
     max_tokens = get_config('regime_classifier', 'ai_research', 'max_tokens',
                             default=600)
     

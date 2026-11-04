@@ -50,6 +50,14 @@ def validate_input_data(portfolio_data):
 
     for ticker, data in portfolio_data.items():
 
+        # --- Defensive: data_fetcher may insert None on hard fetch failure
+        # (e.g. Eulerpool 502 for LDO.MI). Without this guard the next line
+        # crashes with AttributeError and the whole daily run dies. ---
+        if data is None:
+            warnings.append(f"{ticker}: fetch returned None — SKIPPED")
+            portfolio_data[ticker] = {'_skip': True, 'current_price': None}
+            continue
+
         # --- Critical: must have current price ---
         if data.get('current_price') is None:
             warnings.append(f"{ticker}: No current price — SKIPPED")
